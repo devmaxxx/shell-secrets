@@ -3,7 +3,7 @@
   "type": "module",
   "version": "0.1.0",
   "packageManager": "pnpm@10.23.0",
-  "description": "Find live-looking API tokens, private keys and database passwords in text and shell commands, with zero dependencies",
+  "description": "Find live API tokens, private keys and database passwords in strings, logs, AI-agent tool calls and shell commands. Zero dependencies, in-process, typed.",
   "author": "arenuzzz",
   "license": "MIT",
   "homepage": "https://github.com/arenuzzz/secret-sniffer#readme",
@@ -11,7 +11,9 @@
     "type": "git",
     "url": "git+https://github.com/arenuzzz/secret-sniffer.git"
   },
-  "bugs": "https://github.com/arenuzzz/secret-sniffer/issues",
+  "bugs": {
+    "url": "https://github.com/arenuzzz/secret-sniffer/issues"
+  },
   "keywords": [
     "secrets",
     "secret-detection",
@@ -22,7 +24,14 @@
     "leak",
     "security",
     "redact",
-    "pre-commit"
+    "pre-commit",
+    "gitleaks",
+    "secretlint",
+    "detect-secrets",
+    "ai-agent",
+    "claude-code",
+    "hook",
+    "scanner"
   ],
   "sideEffects": false,
   "exports": {
@@ -31,10 +40,15 @@
   },
   "types": "./dist/index.d.mts",
   "files": [
+    "CHANGELOG.md",
     "dist"
   ],
   "engines": {
     "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
   },
   "scripts": {
     "build": "tsdown",
