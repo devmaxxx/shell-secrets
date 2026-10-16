@@ -1,0 +1,56 @@
+{
+  "name": "secret-sniffer",
+  "type": "module",
+  "version": "0.1.0",
+  "packageManager": "pnpm@10.23.0",
+  "description": "Find live-looking API tokens, private keys and database passwords in text and shell commands, with zero dependencies",
+  "author": "arenuzzz",
+  "license": "MIT",
+  "homepage": "https://github.com/arenuzzz/secret-sniffer#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/arenuzzz/secret-sniffer.git"
+  },
+  "bugs": "https://github.com/arenuzzz/secret-sniffer/issues",
+  "keywords": [
+    "secrets",
+    "secret-detection",
+    "secret-scanning",
+    "credentials",
+    "api-key",
+    "token",
+    "leak",
+    "security",
+    "redact",
+    "pre-commit"
+  ],
+  "sideEffects": false,
+  "exports": {
+    ".": "./dist/index.mjs",
+    "./package.json": "./package.json"
+  },
+  "types": "./dist/index.d.mts",
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsdown",
+    "dev": "tsdown --watch",
+    "lint": "eslint .",
+    "typecheck": "tsc",
+    "test": "vitest run",
+    "prepublishOnly": "pnpm run build"
+  },
+  "devDependencies": {
+    "@antfu/eslint-config": "^9.5.1",
+    "@types/node": "^26.6.5",
+    "eslint": "^10.13.0",
+    "publint": "^0.3.25",
+    "tsdown": "^0.23.1",
+    "typescript": "^6.0.3",
+    "vitest": "^5.0.5"
+  }
+}
