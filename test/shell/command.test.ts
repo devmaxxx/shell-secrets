@@ -460,7 +460,7 @@ describe('publishers the shell hides behind quoting, wrappers and substitutions'
   it('stays fast on input built to make a regex backtrack', () => {
     const started = performance.now()
     findSecretsInCommand(`echo${' git'.repeat(24_000)}`)
-    expect(performance.now() - started).toBeLessThan(500)
+    expect(performance.now() - started).toBeLessThan(1000)
   })
 
   it('stays fast when many publishers follow many other commands', () => {

@@ -7,23 +7,31 @@ on:
 
 permissions:
   contents: read
-  # npm Trusted Publisher: OIDC auth and provenance, no NPM_TOKEN.
+  # npm Trusted Publisher: OIDC auth and provenance, no NPM_TOKEN. npm sets a
+  # trusted publisher up only on a package that exists, so the first version
+  # is published by hand.
   id-token: write
 
 jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: lts/*
           cache: pnpm
           registry-url: https://registry.npmjs.org
+      - name: Check the tag matches package.json
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if [ "${GITHUB_REF_NAME#v}" != "$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match package.json version $version"
+            exit 1
+          fi
       # Trusted publishing needs npm 11.5.1 or later.
-      - run: npm install -g npm@latest
+      - run: npm install -g npm@11
       - run: pnpm install --frozen-lockfile
-      - run: pnpm build
       - run: pnpm test
       - run: npm publish --provenance --access public

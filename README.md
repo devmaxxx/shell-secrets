@@ -72,7 +72,7 @@ yarn add shell-secrets
 bun add shell-secrets
 ```
 
-Requires Node.js 20 or later.
+Requires Node.js 22 or later.
 
 ## Quick start
 
@@ -326,6 +326,7 @@ The string scanners above cover far more providers than shell-secrets: @sanity-l
 - A secret with no recognisable shape is found only under a secret-sounding name, and only when it looks random: a human-chosen `password = "summer2024"` is not reported.
 - 38 rules, not hundreds. Add your own for the services you use.
 - No git history scanning; the CLI only installs and runs the agent hook.
+- macOS and Linux only: the hook command runs through a POSIX shell.
 - Shell parsing is best effort. A command it cannot read is not treated as a plain write, which is the stricter answer.
 - Plain `git add` and `git commit -a` are not scanned: they stage files git already tracks or does not ignore, which a write to them was checked against when it was made. Scan the staged diff with the [pre-commit recipe](#pre-commit-check-on-the-staged-diff) to cover them.
 - A script run from a file or a pipe (`bash deploy.sh`, `curl … | bash`, `python publish.py`) runs code the command line does not show, and a variable set outside the command (`-m "$TOKEN"` with `TOKEN` from the agent's environment) expands to a value the hook never sees; neither is followed.
