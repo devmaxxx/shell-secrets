@@ -309,4 +309,4 @@ Test fixtures are assembled at runtime in [`test/fake.ts`](./test/fake.ts) so th
 
 ## License
 
-[MIT](./LICENSE) © arenuzzz
+[MIT](./LICENSE) © devmaxxx
