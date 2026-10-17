@@ -1,3 +1,4 @@
+import { decodeBase64 } from '../scan/base64'
 import { FILE_NAME, FILE_PATH, ID_NAME, IDENTIFIER_WORD, MEMBER_PATH, NOT_A_SECRET_NAME, SEQUENCES, UUID } from './constants'
 import { isRandom } from './randomness'
 // `q8Zr3LmVbN.Tw7xKd2pYs` has the shape of a path too; a part with digits past
@@ -31,7 +32,14 @@ export function isNotASecretName(match: RegExpExecArray): boolean {
  * of the alphabet are not, whatever they are called. The cheap shape checks
  * run before the randomness test.
  */
+// Base64 of hex or a UUID draws on a handful of characters, so it reads as
+// patterned; the text it encodes is what shows whether it is random.
 export function isGenericNonSecret(value: string, name: string): boolean {
+  const decoded = value.length % 4 === 0 && /^[A-Z0-9+/]+={0,2}$/i.test(value) ? decodeBase64(value) : null
+  return isPlainNonSecret(value, name) && (decoded === null || isPlainNonSecret(decoded, name))
+}
+
+function isPlainNonSecret(value: string, name: string): boolean {
   if (UUID.test(value))
     return ID_NAME.test(name)
   return (

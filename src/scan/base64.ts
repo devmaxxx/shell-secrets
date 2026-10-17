@@ -7,7 +7,8 @@ export function fromBase64(blob: string): string {
   return atob(blob.replace(/-/g, '+').replace(/_/g, '/'))
 }
 
-function decodeBase64(blob: string): string | null {
+/** The text a blob encodes, or null when it is not base64 of printable text. */
+export function decodeBase64(blob: string): string | null {
   try {
     const decoded = fromBase64(blob.replace(/=+$/, ''))
     return PRINTABLE.test(decoded) ? decoded : null

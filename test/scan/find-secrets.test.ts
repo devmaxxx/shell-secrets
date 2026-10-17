@@ -1,3 +1,4 @@
+import { Buffer } from 'node:buffer'
 import { describe, expect, it } from 'vitest'
 import { findNewSecrets, findSecrets } from '../../src'
 import { ALNUM, fake, p, rand, RULE_OF } from '../support/fake'
@@ -262,6 +263,13 @@ describe('a secret-named value that is not a secret', () => {
       expect(ids(text)).toEqual([])
     })
   }
+
+  it('judges a base64 value by the text it encodes', () => {
+    const encoded = (text: string): string => Buffer.from(text).toString('base64')
+    expect(ids(`CLOCKIFY_API_KEY = "${encoded(crypto.randomUUID())}"`)).toEqual(['generic-secret'])
+    expect(ids(`API_KEY=${encoded(rand(32, '0123456789abcdef'))}`)).toEqual(['generic-secret'])
+    expect(ids(`session_id = "${encoded(crypto.randomUUID())}"`)).toEqual([])
+  })
 
   it('reads the punctuation password generators emit as part of a generic value', () => {
     expect(ids(`db_password = "${rand(6)}&${rand(5)}?${rand(5)}$${rand(4)}|${rand(4)}:x"`)).toEqual(['generic-secret'])
