@@ -4,6 +4,8 @@
 // "xxxx" and is rightly read as a placeholder, which would make the suite flaky.
 export const ALNUM = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
 const UPPER_NUM = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'
+const HEX = '0123456789abcdef'
+const BECH32_UPPER = 'QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L'
 
 let seed = 0x5EED
 function next(): number {
@@ -33,6 +35,24 @@ export const fake = {
   slackWebhook: () => p('https://hooks', '.slack.com/services/T', rand(10, UPPER_NUM), '/B', rand(10, UPPER_NUM), '/', rand(24)),
   anthropic: () => p('sk', '-ant-api03-', rand(90)),
   openai: () => p('sk', '-proj-', rand(48)),
+  google: () => p('AI', 'za', rand(35)),
+  googleOauth: () => p('GOC', 'SPX-', rand(28)),
+  groq: () => p('gs', 'k_', rand(52)),
+  xai: () => p('xa', 'i-', rand(80)),
+  huggingface: () => p('h', 'f_', rand(34)),
+  gitlab: () => p('glp', 'at-', rand(20)),
+  gitlabRoutable: () => p('glp', 'at-', rand(27), '.01.', rand(9)),
+  npm: () => p('np', 'm_', rand(36)),
+  pypi: () => p('py', 'pi-AgEIcHlwaS5vcmc', rand(150)),
+  stripe: () => p('sk', '_live_', rand(99)),
+  stripeRestricted: () => p('rk', '_live_', rand(99)),
+  stripeWebhook: () => p('wh', 'sec_', rand(32)),
+  sendgrid: () => p('S', 'G.', rand(22), '.', rand(43)),
+  linear: () => p('lin', '_api_', rand(40)),
+  shopify: () => p('shp', 'at_', rand(32, HEX)),
+  digitalocean: () => p('do', 'p_v1_', rand(64, HEX)),
+  discordWebhook: () => p('https://discord', '.com/api/webhooks/', rand(19, '0123456789'), '/', rand(68)),
+  age: () => p('AGE-SECRET', '-KEY-1', rand(58, BECH32_UPPER)),
   aws: () => p('AK', 'IA', rand(16, UPPER_NUM)),
   awsTemporary: () => p('AS', 'IA', rand(16, UPPER_NUM)),
   awsSecret: () => p('aws_secret', '_access_key = ', rand(40, `${ALNUM}/+`)),
@@ -67,6 +87,24 @@ export const RULE_OF: Record<keyof typeof fake, string> = {
   slackWebhook: 'slack-webhook-url',
   anthropic: 'anthropic-api-key',
   openai: 'openai-api-key',
+  google: 'google-api-key',
+  googleOauth: 'google-oauth-client-secret',
+  groq: 'groq-api-key',
+  xai: 'xai-api-key',
+  huggingface: 'huggingface-token',
+  gitlab: 'gitlab-token',
+  gitlabRoutable: 'gitlab-token',
+  npm: 'npm-token',
+  pypi: 'pypi-token',
+  stripe: 'stripe-secret-key',
+  stripeRestricted: 'stripe-secret-key',
+  stripeWebhook: 'stripe-webhook-secret',
+  sendgrid: 'sendgrid-api-key',
+  linear: 'linear-api-key',
+  shopify: 'shopify-token',
+  digitalocean: 'digitalocean-token',
+  discordWebhook: 'discord-webhook-url',
+  age: 'age-secret-key',
   aws: 'aws-access-key',
   awsTemporary: 'aws-access-key',
   awsSecret: 'aws-secret-key',

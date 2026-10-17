@@ -91,6 +91,10 @@ describe('letting placeholders and references through', () => {
     'a URI with a starred password': 'redis://default:****@cache.prod:6379',
     'a URI with <password>': 'mongodb+srv://app:<password>@cluster0.mongodb.net',
     'a URI with no password': 'postgres://app@db.prod:5432/app',
+    'a Stripe test-mode key': p('sk', '_test_', rand(99)),
+    'an x-ed out Stripe key': p('sk', '_live_', 'x'.repeat(24)),
+    'a Google key marked as yours': p('AI', 'za', 'Sy-your-api-key-goes-here-123456789'),
+    'an npm token of zeros': p('np', 'm_', '0'.repeat(36)),
     'a short JWT sample': p('ey', 'J', rand(12), '.ey', 'J', rand(12), '.', rand(22)),
     'a timestamp-ish ratio': '12345678:not-a-token',
     'a word that ends in sk-': 'the task-runner-for-everything-in-the-repository-and-more ran',
@@ -201,5 +205,13 @@ describe('findNewSecrets: a secret the earlier text already holds', () => {
 
   it('reports everything when the earlier text is empty', () => {
     expect(findNewSecrets('', `TOKEN=${token}\n`).map(f => f.ruleId)).toEqual(['github-token'])
+  })
+})
+
+describe('the end of a token at the end of a sentence', () => {
+  it('leaves a sentence-final dot out of a GitLab token', () => {
+    const token = fake.gitlab()
+    const [finding] = findSecrets(`rotate ${token}.`)
+    expect(finding?.end).toBe('rotate '.length + token.length)
   })
 })

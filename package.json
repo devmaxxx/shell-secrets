@@ -1,18 +1,18 @@
 {
-  "name": "secret-sniffer",
+  "name": "shell-secrets",
   "type": "module",
   "version": "0.1.0",
   "packageManager": "pnpm@10.23.0",
   "description": "Find live API tokens, private keys and database passwords in strings, logs, AI-agent tool calls and shell commands. Zero dependencies, in-process, typed.",
-  "author": "arenuzzz",
+  "author": "devmaxxx",
   "license": "MIT",
-  "homepage": "https://github.com/arenuzzz/secret-sniffer#readme",
+  "homepage": "https://github.com/devmaxxx/shell-secrets#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/arenuzzz/secret-sniffer.git"
+    "url": "git+https://github.com/devmaxxx/shell-secrets.git"
   },
   "bugs": {
-    "url": "https://github.com/arenuzzz/secret-sniffer/issues"
+    "url": "https://github.com/devmaxxx/shell-secrets/issues"
   },
   "keywords": [
     "secrets",
@@ -31,6 +31,8 @@
     "ai-agent",
     "claude-code",
     "hook",
+    "shell",
+    "bash",
     "scanner"
   ],
   "sideEffects": false,
@@ -65,6 +67,7 @@
     "publint": "^0.3.25",
     "tsdown": "^0.23.1",
     "typescript": "^6.0.3",
+    "unrun": "^0.3.1",
     "vitest": "^5.0.5"
   }
 }

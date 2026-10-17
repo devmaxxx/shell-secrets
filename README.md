@@ -1,18 +1,48 @@
 <div align="center">
 
-# secret-sniffer
+# shell-secrets
 
 **Catch a secret in a shell command or an AI-agent tool call before it runs — written to a file, exported, or put in a commit message. Zero dependencies.**
 
-[![npm version](https://img.shields.io/npm/v/secret-sniffer?color=cb3837)](https://www.npmjs.com/package/secret-sniffer)
-[![npm downloads](https://img.shields.io/npm/dm/secret-sniffer)](https://www.npmjs.com/package/secret-sniffer)
-[![CI](https://github.com/arenuzzz/secret-sniffer/actions/workflows/ci.yml/badge.svg)](https://github.com/arenuzzz/secret-sniffer/actions/workflows/ci.yml)
-[![types](https://img.shields.io/npm/types/secret-sniffer)](https://www.npmjs.com/package/secret-sniffer)
+[![npm version](https://img.shields.io/npm/v/shell-secrets?color=cb3837)](https://www.npmjs.com/package/shell-secrets)
+[![npm downloads](https://img.shields.io/npm/dm/shell-secrets)](https://www.npmjs.com/package/shell-secrets)
+[![CI](https://github.com/devmaxxx/shell-secrets/actions/workflows/ci.yml/badge.svg)](https://github.com/devmaxxx/shell-secrets/actions/workflows/ci.yml)
+[![types](https://img.shields.io/npm/types/shell-secrets)](https://www.npmjs.com/package/shell-secrets)
 [![zero dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)](./package.json)
-[![bundle size](https://img.shields.io/bundlejs/size/secret-sniffer)](https://bundlejs.com/?q=secret-sniffer)
-[![license: MIT](https://img.shields.io/npm/l/secret-sniffer)](./LICENSE)
+[![bundle size](https://img.shields.io/bundlejs/size/shell-secrets)](https://bundlejs.com/?q=shell-secrets)
+[![license: MIT](https://img.shields.io/npm/l/shell-secrets)](./LICENSE)
+
+[Install](#install) · [Quick start](#quick-start) · [Detected secrets](#detected-secrets) · [API](#api) · [Recipes](#recipes) · [Compared](#compared-with-other-scanners)
 
 </div>
+
+<p align="center">
+  <img src="./demo/demo.gif" alt="The PreToolUse hook recipe blocks a Bash call that writes a GitHub token into config.js and lets the same write through $GITHUB_TOKEN pass" width="800">
+</p>
+
+The [hook recipe](#block-secrets-in-ai-agent-tool-calls) run on two agent tool calls; the token is a fake. Regenerate with `pnpm build && vhs demo/demo.tape`.
+
+<details>
+<summary><b>Table of contents</b></summary>
+
+- [Why](#why)
+- [Features](#features)
+- [Install](#install)
+- [Quick start](#quick-start)
+- [Detected secrets](#detected-secrets)
+- [API](#api)
+  - [`findSecrets`](#findsecretstext-options)
+  - [`findNewSecrets`](#findnewsecretsbefore-after-options)
+  - [`findSecretsInCommand`](#findsecretsincommandcmd-options)
+  - [`onlyWritesTo`](#onlywritestocmd-accept)
+  - [Custom and disabled rules](#custom-and-disabled-rules)
+- [Recipes](#recipes)
+- [Compared with other scanners](#compared-with-other-scanners)
+- [Limits](#limits)
+- [Contributing](#contributing)
+- [License](#license)
+
+</details>
 
 ## Why
 
@@ -24,7 +54,7 @@ Coding agents and CI bots run shell commands, and that is where secrets leak now
 
 - **Reads shell commands.** `findSecretsInCommand` reports secrets assigned or exported (`NAME=secret`), the files a command writes through `>`, `>>` or `tee`, and the message files `git` / `gh` would publish.
 - **Built for agent tool calls.** `onlyWritesTo` answers "does this command only write the secret into an allowed file, such as a gitignored `.env`?".
-- **Zero runtime dependencies.** ESM, fully typed, about 5 kB gzipped.
+- **Zero runtime dependencies.** ESM, fully typed, about 7 kB gzipped.
 - **Tuned for precision.** Placeholders (`ghp_xxxx…`, `<token>`, `example`), variable references (`${DB_PASSWORD}`) and local dev credentials (`postgres:postgres@localhost`) are not reported, so a hit is worth stopping for.
 - **Safe to log.** A finding holds the rule, the offsets and a redacted preview such as `ghp_********`. It never holds the value.
 - **Diff-aware.** `findNewSecrets` reports only what an edit adds, not secrets the text already had.
@@ -34,10 +64,10 @@ Coding agents and CI bots run shell commands, and that is where secrets leak now
 ## Install
 
 ```sh
-npm install secret-sniffer
-pnpm add secret-sniffer
-yarn add secret-sniffer
-bun add secret-sniffer
+npm install shell-secrets
+pnpm add shell-secrets
+yarn add shell-secrets
+bun add shell-secrets
 ```
 
 Requires Node.js 20 or later.
@@ -45,7 +75,7 @@ Requires Node.js 20 or later.
 ## Quick start
 
 ```ts
-import { findSecrets } from 'secret-sniffer'
+import { findSecrets } from 'shell-secrets'
 
 const token = `ghp_${'aBcDeFgHiJkLmNoPqRsTuVwXyZ9876543210'}` // fake, split so this README scans clean
 const log = `curl -H "Authorization: token ${token}" https://api.github.com/user`
@@ -72,9 +102,25 @@ findSecrets('postgres://app:$PG_PASSWORD@db.prod.internal/app') // [] (variable 
 | `slack-webhook-url` | Slack incoming webhook | `https://hooks.slack.com/services/T••••/B••••/••••` | `SLACK_WEBHOOK_URL` |
 | `anthropic-api-key` | Anthropic | `sk-ant-••••` | `ANTHROPIC_API_KEY` |
 | `openai-api-key` | OpenAI (`sk-`, `sk-proj-`, `sk-svcacct-`, `sk-admin-`) | `sk-proj-••••` | `OPENAI_API_KEY` |
+| `google-api-key` | Google API key (Gemini, Maps, Firebase) | `AIza••••` (39 chars) | `GOOGLE_API_KEY` |
+| `google-oauth-client-secret` | Google OAuth client secret | `GOCSPX-••••` | `GOOGLE_CLIENT_SECRET` |
+| `groq-api-key` | Groq | `gsk_••••` | `GROQ_API_KEY` |
+| `xai-api-key` | xAI | `xai-••••` | `XAI_API_KEY` |
+| `huggingface-token` | Hugging Face | `hf_••••` | `HF_TOKEN` |
+| `gitlab-token` | GitLab personal, deploy, trigger, runner, OAuth token | `glpat-••••` | `GITLAB_TOKEN` |
+| `npm-token` | npm access token | `npm_••••` (36 chars) | `NPM_TOKEN` |
+| `pypi-token` | PyPI API token | `pypi-AgEIcHlwaS5vcmc••••` | `PYPI_API_TOKEN` |
+| `stripe-secret-key` | Stripe live secret or restricted key (test mode is ignored) | `sk_live_••••`, `rk_live_••••` | `STRIPE_SECRET_KEY` |
+| `stripe-webhook-secret` | Stripe webhook signing secret | `whsec_••••` | `STRIPE_WEBHOOK_SECRET` |
+| `sendgrid-api-key` | SendGrid | `SG.••••.••••` | `SENDGRID_API_KEY` |
+| `linear-api-key` | Linear | `lin_api_••••` | `LINEAR_API_KEY` |
+| `shopify-token` | Shopify access token | `shpat_••••` | `SHOPIFY_ACCESS_TOKEN` |
+| `digitalocean-token` | DigitalOcean personal, OAuth, refresh token | `dop_v1_••••` | `DIGITALOCEAN_TOKEN` |
+| `discord-webhook-url` | Discord webhook | `https://discord.com/api/webhooks/••••/••••` | `DISCORD_WEBHOOK_URL` |
 | `aws-access-key` | AWS access key ID, long-lived or temporary | `AKIA••••`, `ASIA••••` (20 chars) | `AWS_ACCESS_KEY_ID` |
 | `aws-secret-key` | AWS secret access key or session token, read off its name | `aws_secret_access_key = ••••` | `AWS_SECRET_ACCESS_KEY` |
 | `private-key` | PEM / PGP private key with a body, encrypted or inside a JSON string | `-----BEGIN … PRIVATE KEY-----` + body | — |
+| `age-secret-key` | age encryption identity | `AGE-SECRET-KEY-1••••` | — |
 | `database-uri-password` | MongoDB, PostgreSQL, MySQL, MariaDB, Redis, AMQP URI | `postgres://user:<password>@host` | `DATABASE_URL` |
 | `database-uri-query-password` | libpq / JDBC URI | `jdbc:postgresql://host/db?password=<password>` | `DATABASE_URL` |
 | `telegram-bot-token` | Telegram bot, also inside a Bot API URL | `123456789:••••` | `TELEGRAM_BOT_TOKEN` |
@@ -153,8 +199,8 @@ The frozen, ordered list of built-in `Rule`s from the table above.
 Every function takes `{ rules }`. Filter `defaultRules` to disable one, spread it to add your own:
 
 ```ts
-import type { Rule } from 'secret-sniffer'
-import { defaultRules, findSecrets } from 'secret-sniffer'
+import type { Rule } from 'shell-secrets'
+import { defaultRules, findSecrets } from 'shell-secrets'
 
 const acme: Rule = {
   id: 'acme-key',
@@ -183,7 +229,7 @@ A [Claude Code `PreToolUse` hook](https://docs.anthropic.com/en/docs/claude-code
 ```js
 // .claude/hooks/no-secrets.mjs
 import { readFileSync } from 'node:fs'
-import { findNewSecrets, findSecrets, findSecretsInCommand } from 'secret-sniffer'
+import { findNewSecrets, findSecrets, findSecretsInCommand } from 'shell-secrets'
 
 const { tool_name: tool, tool_input: input } = JSON.parse(readFileSync(0, 'utf8'))
 
@@ -222,7 +268,7 @@ Scans only the lines being added, so secrets already in the history don't block 
 ```js
 // scripts/check-staged.mjs, run from a pre-commit hook (husky, lefthook, …)
 import { execFileSync } from 'node:child_process'
-import { findSecrets } from 'secret-sniffer'
+import { findSecrets } from 'shell-secrets'
 
 const diff = execFileSync('git', ['diff', '--cached', '--unified=0', '--no-color'], { encoding: 'utf8' })
 const added = diff
@@ -242,7 +288,7 @@ process.exit(findings.length > 0 ? 1 : 0)
 Replace each secret with its preview before the line leaves the process.
 
 ```ts
-import { findSecrets } from 'secret-sniffer'
+import { findSecrets } from 'shell-secrets'
 
 export function scrub(line: string): string {
   let out = line
@@ -259,27 +305,27 @@ export function scrub(line: string): string {
 
 ## Compared with other scanners
 
-| | secret-sniffer | [@sanity-labs/secret-scan](https://www.npmjs.com/package/@sanity-labs/secret-scan) | [@redact-secret/core](https://www.npmjs.com/package/@redact-secret/core) | [secretlint](https://github.com/secretlint/secretlint) | [gitleaks](https://github.com/gitleaks/gitleaks) |
+| | shell-secrets | [@sanity-labs/secret-scan](https://www.npmjs.com/package/@sanity-labs/secret-scan) | [@redact-secret/core](https://www.npmjs.com/package/@redact-secret/core) | [secretlint](https://github.com/secretlint/secretlint) | [gitleaks](https://github.com/gitleaks/gitleaks) |
 | --- | --- | --- | --- | --- | --- |
 | Runtime | Node.js library | JS library, Node and browser | Rust core via wasm, Node and browser | Node.js CLI and library | Go binary |
 | Input | one string or command, in-process | one string, in-process | one string, in-process | files; `@secretlint/core` API takes content | files, git history, stdin |
-| Rules | 15 curated | 1,100+, from TruffleHog detectors | built-in detectors plus declarative rulesets | presets for many providers | large built-in set, with entropy thresholds |
+| Rules | 31 curated | 1,100+, from TruffleHog detectors | built-in detectors plus declarative rulesets | presets for many providers | large built-in set, with entropy thresholds |
 | Redaction | masked preview in each finding | `redact()` | `scanAndRedact()` | no | no |
 | Runtime dependencies | 0 | 0 | 1 (its wasm build) | several | — |
 | Shell-command analysis | yes | no | no | no | no |
 
-The string scanners above cover far more providers than secret-sniffer: @sanity-labs/secret-scan ships over 1,100 rules against its 15. Use one of them, or gitleaks or secretlint for a repository and its history, when coverage is what you need. Use secret-sniffer when the input is a shell command or an agent's tool call and you need to know what the command does with the secret — exports it, writes it to a file, or puts it in a commit message — and where a false positive costs a blocked action.
+The string scanners above cover far more providers than shell-secrets: @sanity-labs/secret-scan ships over 1,100 rules against its 31. Use one of them, or gitleaks or secretlint for a repository and its history, when coverage is what you need. Use shell-secrets when the input is a shell command or an agent's tool call and you need to know what the command does with the secret — exports it, writes it to a file, or puts it in a commit message — and where a false positive costs a blocked action.
 
 ## Limits
 
 - Pattern-based: a secret with no recognisable shape (a generic `password = …`, a random hex string) is not found. There is no entropy scan.
-- 15 rules, not hundreds. Add your own for the services you use.
+- 31 rules, not hundreds. Add your own for the services you use.
 - No CLI and no git history scanning.
 - Shell parsing is best effort. A command it cannot read is not treated as a plain write, which is the stricter answer.
 
 ## Contributing
 
-Issues and pull requests are welcome at [github.com/arenuzzz/secret-sniffer](https://github.com/arenuzzz/secret-sniffer).
+Issues and pull requests are welcome at [github.com/devmaxxx/shell-secrets](https://github.com/devmaxxx/shell-secrets).
 
 ```sh
 pnpm install
@@ -293,4 +339,4 @@ Test fixtures are assembled at runtime in [`test/fake.ts`](./test/fake.ts) so th
 
 ## License
 
-[MIT](./LICENSE) © arenuzzz
+[MIT](./LICENSE) © devmaxxx

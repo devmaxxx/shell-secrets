@@ -21,7 +21,7 @@ function prepared(rule: Rule, text: string): string {
   }
   const subject = rule.prepare(text)
   if (subject.length !== text.length) {
-    throw new Error(`secret-sniffer: rule "${rule.id}" prepare() changed the text's length, so offsets would be wrong`)
+    throw new Error(`shell-secrets: rule "${rule.id}" prepare() changed the text's length, so offsets would be wrong`)
   }
   return subject
 }
