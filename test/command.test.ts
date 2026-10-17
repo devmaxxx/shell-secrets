@@ -288,7 +288,36 @@ describe('hostile command lines, in linear time', () => {
     within(2000, Array.from({ length: 80_000 }, (_, i) => `<<A${i}\n`).join(''))
   })
 
+  it('scans a long run of wrappers whose options could be read two ways', () => {
+    within(2000, 'sudo -u '.repeat(50_000))
+    within(2000, 'env -i A=1 '.repeat(50_000))
+  })
+
   it('scans a tee with a long run of operands', () => {
     within(2000, `echo a | tee ${'x '.repeat(100_000)}`)
+  })
+})
+
+describe('wrappers with options, clobber redirects and value-taking flags', () => {
+  const messageFiles = (cmd: string): string[] => findSecretsInCommand(cmd).messageFiles
+
+  it('finds git behind a wrapper that has options of its own', () => {
+    expect(messageFiles('sudo -u root git commit -F m.txt')).toEqual(['m.txt'])
+    expect(messageFiles('env -i A=1 git commit -F m.txt')).toEqual(['m.txt'])
+    expect(messageFiles('sudo -E -H git tag -a v1 -F notes.md')).toEqual(['notes.md'])
+  })
+
+  it('reads a tee behind sudo -u as a write', () => {
+    expect(findSecretsInCommand('echo a | sudo -u root tee /etc/x').redirectTargets).toEqual(['/etc/x'])
+  })
+
+  it('accepts a >| write like a > write', () => {
+    expect(onlyWritesTo('echo hi >| .env', path => path === '.env')).toBe(true)
+    expect(onlyWritesTo('echo hi >| .env >| /tmp/leak', path => path === '.env')).toBe(false)
+  })
+
+  it('does not read -mF, a message of "F", as a message file flag', () => {
+    expect(messageFiles('git commit -mF msg.txt')).toEqual([])
+    expect(messageFiles('git commit -aF msg.txt')).toEqual(['msg.txt'])
   })
 })

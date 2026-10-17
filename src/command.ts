@@ -81,8 +81,10 @@ function isLoneWrite(cmd: string, scrubbed: string): boolean {
   if (hasSubstitution(cmd)) {
     return false
   }
+  // `>|` is a redirect that overrides noclobber, not a pipe.
   const line = scrubbed
     .replace(/\d?>&\d(?![\w-])|\d>\s*\/dev\/null(?![^\s|<>])/g, '')
+    .replace(/>\|/g, '> ')
     .trim()
   if (/[;&`\n]|\d>|[<>]\(/.test(line)) {
     return false
@@ -105,8 +107,9 @@ function isLiteralPath(path: string): boolean {
 const PUBLISHES_FILE = new RegExp(
   `^\\s*${COMMAND_PREFIX}(?:git(?:\\s+-\\S+(?:\\s+[^-\\s]\\S*)?)*?\\s+(?:commit|tag|notes|merge)|gh\\s+(?:pr|issue|release))(?![\\w-])`,
 )
-// `-F` may be bundled (`-aF msg`) or glued to its value (`-Fmsg`).
-const MESSAGE_FILE_FLAG = /(?<=^|\s)(?:-[A-Za-z]*?F|--(?:file|body-file|notes-file)(?=[=\s]))=?\s*/g
+// `-F` may be bundled (`-aF msg`) or glued to its value (`-Fmsg`). After a
+// letter that takes a value (`-mF` is the message "F") the rest is that value.
+const MESSAGE_FILE_FLAG = /(?<=^|\s)(?:-(?:(?![mCctuS])[A-Za-z])*?F|--(?:file|body-file|notes-file)(?=[=\s]))=?\s*/g
 
 // A path with `$` or a backtick is kept verbatim, like a redirect target: the
 // caller cannot read it, and silently dropping it would read as "no file".

@@ -16,9 +16,23 @@ const OPAQUE = new RegExp(
   'g',
 )
 
-/** Leading env assignments and wrappers that still leave the next word the command. */
+// Wrapper options that take a separate value: sudo `-u root`, env `-u NAME`,
+// xargs `-n 1`, exec `-a name`. Any other option stands alone.
+const VALUED_OPTION = '-[ugCDhprtUTSnIPdLsEa]'
+
+// The lookahead and back-reference make the option run atomic. Backtracking
+// into it would let each word be an option's value or the next wrapper, and a
+// run like `sudo -u sudo -u …` would take exponential time to reject.
+const WRAPPER_OPTIONS = `(?=(?<wrapperOptions>(?:\\s+(?:${VALUED_OPTION}\\s+[^-\\s]\\S*|-\\S+))*))\\k<wrapperOptions>`
+
+/**
+ * Leading env assignments, wrappers and keywords that still leave the next
+ * word the command. A wrapper's own options (`sudo -u root`, `env -i`,
+ * `xargs -n 1`) are skipped. Embed it at most once per regex: it holds a
+ * named group.
+ */
 export const COMMAND_PREFIX
-  = '(?:(?:[A-Za-z_][A-Za-z0-9_]*=\\S*|(?:command|builtin|exec|nohup|time|sudo|env|xargs|then|do|else|elif|if|while|until|!))\\s+)*(?:[\\w./~-]*\\/)?'
+  = `(?:(?:[A-Za-z_][A-Za-z0-9_]*=\\S*|(?:command|builtin|exec|nohup|time|sudo|doas|env|xargs)${WRAPPER_OPTIONS}|then|do|else|elif|if|while|until|!)\\s+)*(?:[\\w./~-]*\\/)?`
 
 const SEGMENT = /[^\n;&|(){}`]+/g
 
