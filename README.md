@@ -16,14 +16,11 @@
 
 </div>
 
-An agent tries to write a token into a tracked file; a `PreToolUse` hook built on shell-secrets ([recipe](#block-secrets-in-ai-agent-tool-calls)) stops it:
+<p align="center">
+  <img src="./demo/demo.gif" alt="The PreToolUse hook recipe blocks a Bash call that writes a GitHub token into config.js and lets the same write through $GITHUB_TOKEN pass" width="800">
+</p>
 
-```console
-● Bash(echo "GITHUB_TOKEN=ghp_aBcD…" >> config.js)
-  ⎿ PreToolUse:Bash hook blocked the call:
-    Blocked, the call contains a secret:
-    GitHub token (ghp_********): use $GITHUB_TOKEN
-```
+The [hook recipe](#block-secrets-in-ai-agent-tool-calls) run on two agent tool calls; the token is a fake. Regenerate with `pnpm build && vhs demo/demo.tape`.
 
 <details>
 <summary><b>Table of contents</b></summary>
