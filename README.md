@@ -6,7 +6,7 @@
 
 [![npm version](https://img.shields.io/npm/v/shell-secrets?color=cb3837)](https://www.npmjs.com/package/shell-secrets)
 [![npm downloads](https://img.shields.io/npm/dm/shell-secrets)](https://www.npmjs.com/package/shell-secrets)
-[![CI](https://github.com/arenuzzz/shell-secrets/actions/workflows/ci.yml/badge.svg)](https://github.com/arenuzzz/shell-secrets/actions/workflows/ci.yml)
+[![CI](https://github.com/devmaxxx/shell-secrets/actions/workflows/ci.yml/badge.svg)](https://github.com/devmaxxx/shell-secrets/actions/workflows/ci.yml)
 [![types](https://img.shields.io/npm/types/shell-secrets)](https://www.npmjs.com/package/shell-secrets)
 [![zero dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)](./package.json)
 [![bundle size](https://img.shields.io/bundlejs/size/shell-secrets)](https://bundlejs.com/?q=shell-secrets)
@@ -295,7 +295,7 @@ The string scanners above cover far more providers than shell-secrets: @sanity-l
 
 ## Contributing
 
-Issues and pull requests are welcome at [github.com/arenuzzz/shell-secrets](https://github.com/arenuzzz/shell-secrets).
+Issues and pull requests are welcome at [github.com/devmaxxx/shell-secrets](https://github.com/devmaxxx/shell-secrets).
 
 ```sh
 pnpm install

@@ -6,13 +6,13 @@
   "description": "Find live API tokens, private keys and database passwords in strings, logs, AI-agent tool calls and shell commands. Zero dependencies, in-process, typed.",
   "author": "arenuzzz",
   "license": "MIT",
-  "homepage": "https://github.com/arenuzzz/shell-secrets#readme",
+  "homepage": "https://github.com/devmaxxx/shell-secrets#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/arenuzzz/shell-secrets.git"
+    "url": "git+https://github.com/devmaxxx/shell-secrets.git"
   },
   "bugs": {
-    "url": "https://github.com/arenuzzz/shell-secrets/issues"
+    "url": "https://github.com/devmaxxx/shell-secrets/issues"
   },
   "keywords": [
     "secrets",

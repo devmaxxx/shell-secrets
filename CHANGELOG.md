@@ -16,4 +16,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `defaultRules`: 31 built-in rules for GitHub, GitLab, Atlassian, Figma, Slack, Discord, Linear, Anthropic, OpenAI, Google, Groq, xAI, Hugging Face, AWS, DigitalOcean, Stripe, SendGrid, Shopify, npm, PyPI, Telegram, private keys, age keys, database URIs and JWTs.
 - Custom rules through `{ rules }`, with `secretGroup`, `ignore`, `prepare` and `placeholders`.
 
-[0.1.0]: https://github.com/arenuzzz/shell-secrets/releases/tag/v0.1.0
+[0.1.0]: https://github.com/devmaxxx/shell-secrets/releases/tag/v0.1.0
