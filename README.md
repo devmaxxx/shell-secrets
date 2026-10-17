@@ -12,7 +12,40 @@
 [![bundle size](https://img.shields.io/bundlejs/size/shell-secrets)](https://bundlejs.com/?q=shell-secrets)
 [![license: MIT](https://img.shields.io/npm/l/shell-secrets)](./LICENSE)
 
+[Install](#install) · [Quick start](#quick-start) · [Detected secrets](#detected-secrets) · [API](#api) · [Recipes](#recipes) · [Compared](#compared-with-other-scanners)
+
 </div>
+
+An agent tries to write a token into a tracked file; a `PreToolUse` hook built on shell-secrets ([recipe](#block-secrets-in-ai-agent-tool-calls)) stops it:
+
+```console
+● Bash(echo "GITHUB_TOKEN=ghp_aBcD…" >> config.js)
+  ⎿ PreToolUse:Bash hook blocked the call:
+    Blocked, the call contains a secret:
+    GitHub token (ghp_********): use $GITHUB_TOKEN
+```
+
+<details>
+<summary><b>Table of contents</b></summary>
+
+- [Why](#why)
+- [Features](#features)
+- [Install](#install)
+- [Quick start](#quick-start)
+- [Detected secrets](#detected-secrets)
+- [API](#api)
+  - [`findSecrets`](#findsecretstext-options)
+  - [`findNewSecrets`](#findnewsecretsbefore-after-options)
+  - [`findSecretsInCommand`](#findsecretsincommandcmd-options)
+  - [`onlyWritesTo`](#onlywritestocmd-accept)
+  - [Custom and disabled rules](#custom-and-disabled-rules)
+- [Recipes](#recipes)
+- [Compared with other scanners](#compared-with-other-scanners)
+- [Limits](#limits)
+- [Contributing](#contributing)
+- [License](#license)
+
+</details>
 
 ## Why
 
