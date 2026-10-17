@@ -16,23 +16,39 @@ const OPAQUE = new RegExp(
   'g',
 )
 
-// Wrapper options that take a separate value: sudo `-u root`, env `-u NAME`,
-// xargs `-n 1`, exec `-a name`. Any other option stands alone.
-const VALUED_OPTION = '-[ugCDhprtUTSnIPdLsEa]'
-
-// The lookahead and back-reference make the option run atomic. Backtracking
-// into it would let each word be an option's value or the next wrapper, and a
+// The lookahead and back-reference make each option run atomic. Backtracking
+// into it would let every word be an option's value or the next wrapper, and a
 // run like `sudo -u sudo -u …` would take exponential time to reject.
-const WRAPPER_OPTIONS = `(?=(?<wrapperOptions>(?:\\s+(?:${VALUED_OPTION}\\s+[^-\\s]\\S*|-\\S+))*))\\k<wrapperOptions>`
+//
+// `valued` lists the short options that take a separate value, per wrapper: a
+// flag like `sudo -E` or `command -p` stands alone, and counting it as valued
+// would swallow the command that follows. A bundle takes its value from its
+// last letter (`sudo -iu root`).
+function wrapperOptions(id: string, valued: string, longValued = ''): string {
+  const short = valued ? `-[A-Za-z]*[${valued}]\\s+[^-\\s]\\S*|` : ''
+  const long = longValued ? `--(?:${longValued})\\s+[^-\\s]\\S*|` : ''
+  return `(?=(?<${id}>(?:\\s+(?:${short}${long}-\\S+))*))\\k<${id}>`
+}
+
+const SUDO_LONG = 'user|group|host|prompt|role|type|chroot|chdir|other-user|command-timeout|close-from'
+
+const WRAPPERS = [
+  `(?:sudo|doas)${wrapperOptions('sudoOptions', 'ugCDhpRrTtU', SUDO_LONG)}`,
+  `env${wrapperOptions('envOptions', 'uCSP')}`,
+  `xargs${wrapperOptions('xargsOptions', 'nIdLsEPa')}`,
+  `exec${wrapperOptions('execOptions', 'a')}`,
+  `time${wrapperOptions('timeOptions', 'fo')}`,
+  `(?:command|builtin|nohup)${wrapperOptions('plainOptions', '')}`,
+].join('|')
 
 /**
  * Leading env assignments, wrappers and keywords that still leave the next
  * word the command. A wrapper's own options (`sudo -u root`, `env -i`,
- * `xargs -n 1`) are skipped. Embed it at most once per regex: it holds a
- * named group.
+ * `xargs -n 1`) are skipped. Embed it at most once per regex: it holds named
+ * groups.
  */
 export const COMMAND_PREFIX
-  = `(?:(?:[A-Za-z_][A-Za-z0-9_]*=\\S*|(?:command|builtin|exec|nohup|time|sudo|doas|env|xargs)${WRAPPER_OPTIONS}|then|do|else|elif|if|while|until|!)\\s+)*(?:[\\w./~-]*\\/)?`
+  = `(?:(?:[A-Za-z_][A-Za-z0-9_]*=\\S*|${WRAPPERS}|then|do|else|elif|if|while|until|!)\\s+)*(?:[\\w./~-]*\\/)?`
 
 const SEGMENT = /[^\n;&|(){}`]+/g
 

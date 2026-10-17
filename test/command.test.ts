@@ -307,6 +307,13 @@ describe('wrappers with options, clobber redirects and value-taking flags', () =
     expect(messageFiles('sudo -E -H git tag -a v1 -F notes.md')).toEqual(['notes.md'])
   })
 
+  it('does not take a standalone wrapper flag for an option with a value', () => {
+    for (const wrapper of ['sudo -E', 'sudo -n', 'sudo -S', 'sudo -s', 'sudo -iu root', 'sudo --user root', 'command -p', 'time -p', 'xargs -r', 'env -S x']) {
+      expect(messageFiles(`${wrapper} git commit -F m.txt`), wrapper).toEqual(['m.txt'])
+    }
+    expect(findSecretsInCommand('echo a | sudo -E tee /etc/x').redirectTargets).toEqual(['/etc/x'])
+  })
+
   it('reads a tee behind sudo -u as a write', () => {
     expect(findSecretsInCommand('echo a | sudo -u root tee /etc/x').redirectTargets).toEqual(['/etc/x'])
   })
