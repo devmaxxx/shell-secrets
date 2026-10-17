@@ -17,10 +17,10 @@
 </div>
 
 <p align="center">
-  <img src="./demo/demo.gif" alt="The PreToolUse hook recipe blocks a Bash call that writes a GitHub token into config.js and lets the same write through $GITHUB_TOKEN pass" width="800">
+  <img src="./demo/demo.gif" alt="The shell-secrets hook blocks a Bash call that writes a GitHub token into config.js and lets the same write through $GITHUB_TOKEN pass" width="800">
 </p>
 
-The [hook recipe](#block-secrets-in-ai-agent-tool-calls) run on two agent tool calls; the token is a fake. Regenerate with `pnpm build && vhs demo/demo.tape`.
+The [agent hook](#block-secrets-in-ai-agent-tool-calls) run on two tool calls; the token is a fake. Regenerate with `pnpm build && vhs demo/demo.tape`.
 
 <details>
 <summary><b>Table of contents</b></summary>
@@ -186,6 +186,10 @@ onlyWritesTo(`echo "GITHUB_TOKEN=${token}" >> .env`, path => path === '.env') //
 
 Only a lone `echo`, `printf` or `cat` with `>`, `>>` or `| tee` qualifies. A chained, substituted or otherwise piped command never does, nor does a target containing `~`, `$`, a glob or a backtick; `accept` is not called for those.
 
+### `checkToolCall(call, env, options?)`
+
+The secrets an agent's tool call would leak. `call` is `{ kind: 'shell', command }`, `{ kind: 'write', path, content }`, `{ kind: 'edit', path, before, after }` or `{ kind: 'patch', patch }` (Codex `apply_patch`). `env.isIgnored(path)` says whether a file may hold a secret; `env.readFile(path)` returns a file's text or `null`. Writes into ignored files and secrets an edit only keeps return nothing.
+
 ### `defaultRules`
 
 The frozen, ordered list of built-in `Rule`s from the table above.
@@ -224,41 +228,28 @@ A rule may also set:
 
 ### Block secrets in AI-agent tool calls
 
-A [Claude Code `PreToolUse` hook](https://docs.anthropic.com/en/docs/claude-code/hooks) that stops a `Bash`, `Write` or `Edit` call carrying a new secret. Exit code 2 blocks the call and shows stderr to the agent.
+The `shell-secrets` command installs a `PreToolUse` hook for [Claude Code](https://docs.anthropic.com/en/docs/claude-code/hooks) (`Bash`, `Write`, `Edit`, `MultiEdit`, `NotebookEdit`) or [Codex](https://developers.openai.com/codex/hooks) (`Bash`, `apply_patch`). It blocks a call that carries a new secret with exit code 2, which shows the masked finding to the agent.
 
-```js
-// .claude/hooks/no-secrets.mjs
-import { readFileSync } from 'node:fs'
-import { findNewSecrets, findSecrets, findSecretsInCommand } from 'shell-secrets'
-
-const { tool_name: tool, tool_input: input } = JSON.parse(readFileSync(0, 'utf8'))
-
-let findings = []
-if (tool === 'Bash')
-  findings = findSecretsInCommand(input.command).findings
-else if (tool === 'Edit')
-  findings = findNewSecrets(input.old_string, input.new_string)
-else if (tool === 'Write')
-  findings = findSecrets(input.content)
-
-if (findings.length > 0) {
-  const list = findings.map(f => `${f.name} (${f.preview})${f.env ? `: use $${f.env}` : ''}`)
-  console.error(`Blocked, the call contains a secret:\n${list.join('\n')}`)
-  process.exit(2)
-}
+```sh
+npx shell-secrets install claude   # ~/.claude/settings.json
+npx shell-secrets install codex    # ~/.codex/hooks.json; then trust it once in /hooks
+npx shell-secrets install claude --project   # .claude/settings.json, runs the repo's devDependency
+npx shell-secrets uninstall claude
 ```
 
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash|Write|Edit",
-        "hooks": [{ "type": "command", "command": "node .claude/hooks/no-secrets.mjs" }]
-      }
-    ]
-  }
-}
+Installing again replaces the earlier entry and leaves other hooks alone. A project install runs `npx --no-install shell-secrets hook`, so add the package as a devDependency there.
+
+A secret is let through when it only lands in a file git ignores and does not track, such as `.env`: `echo "TOKEN=..." >> .env` passes, `... >> .env; cp .env config.js` does not, and neither does a write to an ignored name that links to a tracked file. The files `git commit -F` and `gh --body-file` publish are scanned too; one the hook cannot read blocks the call. So does a tool call the hook cannot parse.
+
+For a hook of your own, `checkToolCall` holds the same policy:
+
+```js
+import { checkToolCall } from 'shell-secrets'
+
+const findings = checkToolCall(
+  { kind: 'shell', command },
+  { isIgnored: path => isGitIgnored(path), readFile: path => readOrNull(path) },
+)
 ```
 
 ### Pre-commit check on the staged diff

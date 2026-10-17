@@ -10,7 +10,7 @@ Set Theme "GitHub Dark"
 Set TypingSpeed 35ms
 
 Hide
-Type "cd demo && node calls.mjs && export PS1='$ ' && clear"
+Type "cd demo && node calls.mjs && alias shell-secrets='node ../dist/cli.mjs' && export PS1='$ ' && clear"
 Enter
 Show
 
@@ -19,13 +19,13 @@ Enter
 Type "cat leak.json"
 Enter
 Sleep 1.5s
-Type "node no-secrets.mjs < leak.json; echo exit $?"
+Type "shell-secrets hook < leak.json; echo exit $?"
 Enter
 Sleep 3s
 
 Type "# The same write through a variable passes"
 Enter
-Type "node no-secrets.mjs < safe.json; echo exit $?"
+Type "shell-secrets hook < safe.json; echo exit $?"
 Enter
 Sleep 3s
 

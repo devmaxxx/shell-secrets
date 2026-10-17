@@ -1,4 +1,6 @@
 export { findSecretsInCommand, onlyWritesTo } from './command'
+export { checkToolCall } from './guard'
+export type { GuardEnv, ToolCall } from './guard'
 export { defaultRules } from './rules'
 export { findNewSecrets, findSecrets } from './scan'
 export type { CommandFinding, CommandScan, Finding, Rule, ScanOptions } from './types'
