@@ -2,7 +2,7 @@
 
 # secret-sniffer
 
-**Catch live API tokens, private keys and database passwords in any string — before they leak.**
+**Catch a secret in a shell command or an AI-agent tool call before it runs — written to a file, exported, or put in a commit message. Zero dependencies.**
 
 [![npm version](https://img.shields.io/npm/v/secret-sniffer?color=cb3837)](https://www.npmjs.com/package/secret-sniffer)
 [![npm downloads](https://img.shields.io/npm/dm/secret-sniffer)](https://www.npmjs.com/package/secret-sniffer)
@@ -16,16 +16,17 @@
 
 ## Why
 
-Secrets leak through more than commits: a token pasted into a log line, an AI agent writing a key into a file, a shell command with `export GITHUB_TOKEN=…` that lands in a transcript. Scanners like gitleaks and detect-secrets are separate Go or Python binaries built for repositories and git history.
+Coding agents and CI bots run shell commands, and that is where secrets leak now: `echo "$KEY" > config.js`, `export GITHUB_TOKEN=ghp_…` landing in a transcript, a token pasted into the message file of `git commit -F msg.txt`. Repository scanners like gitleaks and secretlint catch it after the fact, in files and history. Generic string scanners see the token but not what the command does with it.
 
-secret-sniffer is a plain JavaScript function. Call it in-process on any string — a log line, a tool call, a shell command, a staged diff — and get back where the secret is and a masked preview, never the secret itself.
+`findSecretsInCommand` reads the command the way the shell would: it reports each secret, the variable it is exported or assigned to, the files the command writes through `>`, `>>` or `tee`, and the message files `git` / `gh` would publish. It is a plain JavaScript function with no dependencies, so it fits in a pre-tool-use hook. It returns where the secret is and a masked preview, never the secret itself. `findSecrets` does the same for any plain string — a log line, a prompt, a staged diff.
 
 ## Features
 
+- **Reads shell commands.** `findSecretsInCommand` reports secrets assigned or exported (`NAME=secret`), the files a command writes through `>`, `>>` or `tee`, and the message files `git` / `gh` would publish.
+- **Built for agent tool calls.** `onlyWritesTo` answers "does this command only write the secret into an allowed file, such as a gitignored `.env`?".
 - **Zero runtime dependencies.** ESM, fully typed, about 5 kB gzipped.
 - **Tuned for precision.** Placeholders (`ghp_xxxx…`, `<token>`, `example`), variable references (`${DB_PASSWORD}`) and local dev credentials (`postgres:postgres@localhost`) are not reported, so a hit is worth stopping for.
 - **Safe to log.** A finding holds the rule, the offsets and a redacted preview such as `ghp_********`. It never holds the value.
-- **Shell-aware.** `findSecretsInCommand` also reports the files a command writes and the message files `git` / `gh` would publish.
 - **Diff-aware.** `findNewSecrets` reports only what an edit adds, not secrets the text already had.
 - **Extensible.** Add your own rules or drop built-in ones with a plain array.
 - **Linear time on hostile input**, so it can run on every prompt, keystroke or commit.
@@ -258,16 +259,16 @@ export function scrub(line: string): string {
 
 ## Compared with other scanners
 
-| | secret-sniffer | [secretlint](https://github.com/secretlint/secretlint) | [gitleaks](https://github.com/gitleaks/gitleaks) | [detect-secrets](https://github.com/Yelp/detect-secrets) |
-| --- | --- | --- | --- | --- |
-| Runtime | Node.js library | Node.js CLI and library | Go binary | Python CLI |
-| Input | one string or command, in-process | files | files, git history, stdin | files, with a baseline |
-| Rules | 15 curated | presets for many providers | large built-in set, with entropy thresholds | plugins, including entropy checks |
-| Git history scanning | no | no | yes | no |
-| CLI | no | yes | yes | yes |
-| Shell-command analysis | yes | no | no | no |
+| | secret-sniffer | [@sanity-labs/secret-scan](https://www.npmjs.com/package/@sanity-labs/secret-scan) | [@redact-secret/core](https://www.npmjs.com/package/@redact-secret/core) | [secretlint](https://github.com/secretlint/secretlint) | [gitleaks](https://github.com/gitleaks/gitleaks) |
+| --- | --- | --- | --- | --- | --- |
+| Runtime | Node.js library | JS library, Node and browser | Rust core via wasm, Node and browser | Node.js CLI and library | Go binary |
+| Input | one string or command, in-process | one string, in-process | one string, in-process | files; `@secretlint/core` API takes content | files, git history, stdin |
+| Rules | 15 curated | 1,100+, from TruffleHog detectors | built-in detectors plus declarative rulesets | presets for many providers | large built-in set, with entropy thresholds |
+| Redaction | masked preview in each finding | `redact()` | `scanAndRedact()` | no | no |
+| Runtime dependencies | 0 | 0 | 1 (its wasm build) | several | — |
+| Shell-command analysis | yes | no | no | no | no |
 
-Use gitleaks, secretlint or detect-secrets to audit a repository; they cover far more providers, and gitleaks covers history too. Use secret-sniffer when you need a function to call on one value at a time — a prompt, a tool call, a log line — where a false positive costs a blocked action.
+The string scanners above cover far more providers than secret-sniffer: @sanity-labs/secret-scan ships over 1,100 rules against its 15. Use one of them, or gitleaks or secretlint for a repository and its history, when coverage is what you need. Use secret-sniffer when the input is a shell command or an agent's tool call and you need to know what the command does with the secret — exports it, writes it to a file, or puts it in a commit message — and where a false positive costs a blocked action.
 
 ## Limits
 
