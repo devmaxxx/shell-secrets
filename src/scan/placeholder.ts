@@ -1,12 +1,4 @@
-const PLACEHOLDER
-  = /x{4,}|\*{3,}|\.{3,}|<[^<>]*>|\{\{|example|placeholder|redacted|dummy|fake|sample|your[_-]?|changeme|replace[_-]?me|0{8,}|1234567/i
-
-export const VARIABLE = /^\$(?:\{\w+\}|\w+)/
-
-// A hand-typed stand-in announces itself up front. Deep in a long value a marker
-// is chance — about one RSA-2048 key body in 200 spells one — and dismissing the
-// value for it would wave a real key through.
-const MARKER_WINDOW = 100
+import { MARKER_WINDOW, PLACEHOLDER } from './constants'
 
 export function hasMarker(value: string): boolean {
   return PLACEHOLDER.test(value.slice(0, MARKER_WINDOW))

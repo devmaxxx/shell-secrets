@@ -38,15 +38,19 @@
   "sideEffects": false,
   "exports": {
     ".": "./dist/index.mjs",
+    "./cli": "./dist/cli.mjs",
     "./package.json": "./package.json"
   },
   "types": "./dist/index.d.mts",
+  "bin": {
+    "shell-secrets": "./dist/cli.mjs"
+  },
   "files": [
     "CHANGELOG.md",
     "dist"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "publishConfig": {
     "access": "public",

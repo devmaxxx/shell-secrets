@@ -1,6 +1,8 @@
-import type { Finding, Rule, ScanOptions } from './types'
+import type { Finding, Rule, ScanOptions } from '../types'
+import { defaultRules } from '../rules'
+import { findEncoded } from './base64'
 import { isPlaceholder } from './placeholder'
-import { defaultRules } from './rules'
+import { redact } from './redact'
 
 const runnable = new WeakMap<RegExp, RegExp>()
 
@@ -24,14 +26,6 @@ function prepared(rule: Rule, text: string): string {
     throw new Error(`shell-secrets: rule "${rule.id}" prepare() changed the text's length, so offsets would be wrong`)
   }
   return subject
-}
-
-// Below this a few leading characters are too large a share of the secret to show.
-const MIN_LENGTH_TO_SHOW_PREFIX = 20
-
-function redact(value: string): string {
-  const shown = value.length >= MIN_LENGTH_TO_SHOW_PREFIX ? 4 : 0
-  return `${value.slice(0, shown)}********`
 }
 
 function scanRule(rule: Rule, text: string): Finding[] {
@@ -78,9 +72,42 @@ export function findSecrets(text: string, options: ScanOptions = {}): Finding[] 
     return []
   }
   const rules = options.rules ?? defaultRules
-  return rules
-    .flatMap(rule => scanRule(rule, text))
-    .sort((a, b) => a.start - b.start)
+  const found = rules.filter(rule => !rule.fallback).flatMap(rule => scanRule(rule, text))
+  const keep = (fresh: Finding[]): void => {
+    const overlaps = overlapIndex(found)
+    // One push per finding: spreading a six-figure array overflows the stack.
+    for (const f of fresh) {
+      if (!overlaps(f))
+        found.push(f)
+    }
+  }
+  keep(findEncoded(text, decoded => findSecrets(decoded, { rules })))
+  for (const rule of rules.filter(rule => rule.fallback))
+    keep(scanRule(rule, text))
+  return found.sort((a, b) => a.start - b.start)
+}
+
+// Kept findings sorted by start, with the furthest end reached so far: a
+// finding overlaps one of them when the last kept finding to start before its
+// end reaches past its start. Linear checks against every kept finding go
+// quadratic on a file with a finding on each of 200k lines.
+function overlapIndex(kept: readonly Finding[]): (f: Finding) => boolean {
+  const sorted = [...kept].sort((a, b) => a.start - b.start)
+  const reach: number[] = []
+  for (const [i, f] of sorted.entries())
+    reach.push(Math.max(f.end, reach[i - 1] ?? 0))
+  return (f) => {
+    let lo = 0
+    let hi = sorted.length
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1
+      if (sorted[mid]!.start < f.end)
+        lo = mid + 1
+      else
+        hi = mid
+    }
+    return lo > 0 && reach[lo - 1]! > f.start
+  }
 }
 
 /**

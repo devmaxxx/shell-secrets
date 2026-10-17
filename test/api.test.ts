@@ -1,7 +1,7 @@
 import type { Rule } from '../src'
 import { describe, expect, it } from 'vitest'
 import { defaultRules, findSecrets } from '../src'
-import { fake, p, rand } from './fake'
+import { fake, p, rand } from './support/fake'
 
 describe('a finding locates the secret without carrying it', () => {
   it('spans exactly the token in running text', () => {

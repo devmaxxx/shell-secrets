@@ -1,45 +1,29 @@
-import type { Rule } from './types'
-import { hasMarker, VARIABLE } from './placeholder'
+import type { Rule } from '../types'
+import { fromBase64 } from '../scan/base64'
+import { VARIABLE } from '../scan/constants'
+import { hasGitHubChecksum } from './checksum'
+import { DEV_PASSWORDS } from './constants'
+import { isDevCredential } from './credentials'
+import { bounded, withoutTemplates } from './patterns'
 
-const BOUNDARY_BEFORE = '(?<![A-Za-z0-9_-])'
-const BOUNDARY_AFTER = '(?![A-Za-z0-9_-])'
-
-function bounded(body: string): RegExp {
-  return new RegExp(`${BOUNDARY_BEFORE}${body}${BOUNDARY_AFTER}`, 'g')
+function isJsonInBase64(body: string): boolean {
+  try {
+    const json = JSON.parse(fromBase64(body))
+    return typeof json === 'object' && json !== null
+  }
+  catch {
+    return false
+  }
 }
 
-// `${PW:-default}` and `${process.env.PW}` hold colons and dots of their own,
-// which would split a URI's user from its password in the wrong place. The cap
-// keeps a run of unclosed `${` linear instead of quadratic.
-function withoutTemplates(text: string): string {
-  return text.replace(/\$\{[^}\s]{0,100}\}/g, template => `$${'V'.repeat(template.length - 1)}`)
-}
-
-const DEV_HOSTS = /^(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])$/
-const DEV_PASSWORDS
-  = /^(?:pass(?:word)?|pwd|secret|postgres|mongo|redis|root|admin|test|user)$/i
-
-/**
- * Compose files and local READMEs are full of `postgres:postgres@localhost`;
- * flagging those would train everyone to ignore the scanner.
- */
-function isDevCredential(user: string, password: string, host: string): boolean {
-  return (
-    VARIABLE.test(password)
-    || hasMarker(password)
-    || password === user
-    || DEV_PASSWORDS.test(password)
-    || DEV_HOSTS.test(host)
-  )
-}
-
-/** The built-in rules, in the order they run. */
-export const defaultRules: readonly Rule[] = Object.freeze([
+/** Rules for formats a provider issues, recognised by their prefix or shape. */
+export const providerRules: readonly Rule[] = [
   {
     id: 'github-token',
     name: 'GitHub token',
     env: 'GITHUB_TOKEN',
     pattern: bounded('gh[pousr]_[A-Za-z0-9]{36,}'),
+    ignore: match => match[0].length === 40 && !hasGitHubChecksum(match[0]),
   },
   {
     id: 'github-fine-grained-token',
@@ -237,6 +221,26 @@ export const defaultRules: readonly Rule[] = Object.freeze([
     ignore: match => VARIABLE.test(match[1] ?? '') || DEV_PASSWORDS.test(match[1] ?? ''),
   },
   {
+    id: 'sentry-token',
+    name: 'Sentry token',
+    env: 'SENTRY_AUTH_TOKEN',
+    pattern: bounded('(?:sntrys_eyJ[A-Za-z0-9+/=_-]{80,}|sntryu_[a-f0-9]{64})'),
+  },
+  {
+    id: 'databricks-token',
+    name: 'Databricks token',
+    env: 'DATABRICKS_TOKEN',
+    pattern: bounded('dapi[a-f0-9]{32}(?:-\\d+)?'),
+  },
+  {
+    id: 'onepassword-service-account-token',
+    name: '1Password service account token',
+    env: 'OP_SERVICE_ACCOUNT_TOKEN',
+    // The body is base64 JSON; one that does not decode is a made-up value.
+    pattern: bounded('ops_(eyJ[A-Za-z0-9+/=_-]{100,})'),
+    ignore: match => !isJsonInBase64(match[1] ?? ''),
+  },
+  {
     id: 'telegram-bot-token',
     name: 'Telegram bot token',
     env: 'TELEGRAM_BOT_TOKEN',
@@ -252,4 +256,4 @@ export const defaultRules: readonly Rule[] = Object.freeze([
     // Short JWTs are almost always jwt.io samples or test fixtures.
     ignore: match => match[0].length < 150,
   },
-])
+]

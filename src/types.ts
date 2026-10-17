@@ -33,6 +33,12 @@ export interface Rule {
    * that judges its own value through `ignore` sets it to `false`.
    */
   readonly placeholders?: boolean
+  /**
+   * Marks a catch-all rule, such as a secret-named assignment, whose finding
+   * is dropped where it overlaps one from a specific rule, so a token is
+   * reported once under its provider's name.
+   */
+  readonly fallback?: boolean
 }
 
 /** One live-looking secret. It never carries the secret's full value. */
@@ -70,8 +76,16 @@ export interface CommandScan {
   /** Files written through `>`, `>>` or `tee`, verbatim and unexpanded; `/dev/*` is left out. */
   readonly redirectTargets: string[]
   /**
-   * Files that `git` or `gh` publish verbatim (`commit -F msg`, `pr create --body-file body`).
+   * Files that `git` or `gh` publish verbatim (`commit -F msg`, `pr create --body-file body`,
+   * the file a `-F -` reads through `<` or `cat file |`) and files `git add -f` stages.
    * The scanner cannot read them; scan their contents with {@link findSecrets}.
    */
   readonly messageFiles: string[]
+  /**
+   * What the command publishes that no file name pins down: `git add -f -A`, a
+   * `--body-file -` fed by a stage other than `cat`, a relative path after `cd`,
+   * a file the command fills from anything but a literal `echo`. Treat each as
+   * unscanned.
+   */
+  readonly unresolvedSources: string[]
 }

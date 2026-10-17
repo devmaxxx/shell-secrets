@@ -1,7 +1,7 @@
 import { basename } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { findSecretsInCommand, onlyWritesTo } from '../src'
-import { fake, rand } from './fake'
+import { findSecretsInCommand, onlyWritesTo } from '../../src'
+import { fake, rand } from '../support/fake'
 
 const ids = (cmd: string): string[] => findSecretsInCommand(cmd).findings.map(f => f.ruleId)
 
@@ -102,7 +102,7 @@ describe('messageFiles: files git or gh publish verbatim', () => {
     'gh pr create --title x --body-file=body.md': 'body.md',
     'gh pr create --title x -F body.md': 'body.md',
     'gh issue comment 4 --body-file ./body.md': './body.md',
-    'git -C sub commit -F body.md': 'body.md',
+    'git -C /repo commit -F /tmp/body.md': '/tmp/body.md',
   }
   for (const [command, file] of Object.entries(COMMANDS)) {
     it(`names the file in \`${command}\``, () => {
@@ -308,7 +308,7 @@ describe('wrappers with options, clobber redirects and value-taking flags', () =
   })
 
   it('does not take a standalone wrapper flag for an option with a value', () => {
-    for (const wrapper of ['sudo -E', 'sudo -n', 'sudo -S', 'sudo -s', 'sudo -iu root', 'sudo --user root', 'command -p', 'time -p', 'xargs -r', 'env -S x']) {
+    for (const wrapper of ['sudo -E', 'sudo -n', 'sudo -S', 'sudo -s', 'sudo -iu root', 'sudo --user root', 'command -p', 'time -p', 'env -S x']) {
       expect(messageFiles(`${wrapper} git commit -F m.txt`), wrapper).toEqual(['m.txt'])
     }
     expect(findSecretsInCommand('echo a | sudo -E tee /etc/x').redirectTargets).toEqual(['/etc/x'])
@@ -326,5 +326,146 @@ describe('wrappers with options, clobber redirects and value-taking flags', () =
   it('does not read -mF, a message of "F", as a message file flag', () => {
     expect(messageFiles('git commit -mF msg.txt')).toEqual([])
     expect(messageFiles('git commit -aF msg.txt')).toEqual(['msg.txt'])
+  })
+})
+
+describe('publishers the shell hides behind quoting, wrappers and substitutions', () => {
+  const scan = (cmd: string): { files: string[], unresolved: string[] } => {
+    const { messageFiles, unresolvedSources } = findSecretsInCommand(cmd)
+    return { files: messageFiles, unresolved: unresolvedSources }
+  }
+  const caught = (cmd: string, path = '.env'): boolean => {
+    const { files, unresolved } = scan(cmd)
+    return files.includes(path) || unresolved.length > 0
+  }
+
+  it('finds git and gh however the command name and flags are quoted or wrapped', () => {
+    for (const cmd of [
+      `'git' add -f .env`,
+      `g''it add -f .env`,
+      `\\git add -f .env`,
+      `/usr/bin/git add -f .env`,
+      `git add "-f" .env`,
+      `git commit -F"" .env`,
+      `git commit -F'.env'`,
+      `nice -n 5 git add -f .env`,
+      `timeout 5 git add -f .env`,
+      `find . -maxdepth 0 -exec git add -f .env \;`,
+      `sh -c 'git add -f .env'`,
+      `bash -c "git commit -F .env"`,
+      `bash -ec 'git add -f .env'`,
+      `eval git add -f .env`,
+      `bash <<'EOF'\ngit add -f .env\nEOF`,
+      `bash <<< 'git add -f .env'`,
+      `$'git' add -f .env`,
+      `bash -c $'git add -f .env'`,
+      'gh gist create < .env',
+      'cat .env | gh gist create',
+    ])
+      expect(caught(cmd), cmd).toBe(true)
+  })
+
+  it('reads git long-option prefixes and the subcommands that stage', () => {
+    for (const cmd of [
+      'git add --forc .env',
+      'git add --f .env',
+      'git stage -f .env',
+      'git update-index --add .env',
+      'git commit --fil=.env',
+      'git commit --file .env',
+      'git hash-object -w .env',
+    ])
+      expect(scan(cmd).files, cmd).toEqual(['.env'])
+    expect(scan('git commit -t .env').files).toEqual(['.env'])
+    expect(scan('git add --pathspec-from-file=list').unresolved).toEqual([])
+    expect(scan('git add -f --pathspec-from-fil=list').unresolved).not.toEqual([])
+    expect(scan('git fast-import < dump').unresolved).not.toEqual([])
+    expect(scan('git -c alias.x=commit x -F .env').unresolved).not.toEqual([])
+  })
+
+  it('blocks content it cannot see: process and command substitutions, variables filled by them', () => {
+    for (const cmd of [
+      'git commit -F <(cat .env)',
+      'git commit -m "$(cat .env)"',
+      'git commit -m "`cat .env`"',
+      'gh pr create --body "$(cat .env)"',
+      'k=$(cat .env); git commit -m "$k"',
+      'read -r k < .env; git commit -m "$k"',
+      'git commit -m "$((1+1))"',
+      `${'x'.repeat(100_001)}`,
+    ])
+      expect(scan(cmd).unresolved, cmd.slice(0, 60)).not.toEqual([])
+    for (const cmd of [
+      `git commit -m "$(cat <<'EOF'\nfix: x\nEOF\n)"`,
+      'git commit -m "$(echo fix)"',
+      'git commit -m "fix $HOME"',
+      'git status -m "$(cat .env)"',
+    ])
+      expect(scan(cmd).unresolved, cmd).toEqual([])
+  })
+
+  it('treats a file the command may change, however it names it, as unknown', () => {
+    for (const cmd of [
+      'echo ok > ./msg && cp .env msg && git commit -F msg',
+      'dd if=.env of=msg && git commit -F msg',
+      `python3 -c "import shutil; shutil.copy('.env', 'msg')" && git commit -F msg`,
+      `cp .env msg && bash -c 'git commit -F msg'`,
+      'echo ok | tee ./README >/dev/null && cp .env README && gh pr create -F README',
+    ])
+      expect(scan(cmd).unresolved, cmd).not.toEqual([])
+    expect(scan('echo ok > ./msg && git commit -F msg')).toEqual({ files: [], unresolved: [] })
+    expect(scan('echo ok > msg && git commit -F ./msg')).toEqual({ files: [], unresolved: [] })
+    expect(scan('npm run build && git add -f dist/').files).toEqual(['dist/'])
+  })
+
+  it('reads the files gh uploads', () => {
+    expect(scan('gh api repos/o/r/issues -F body=@.env').files).toEqual(['.env'])
+    expect(scan('gh api repos/o/r/contents --input .env').files).toEqual(['.env'])
+    expect(scan('gh gist create .env notes.md').files).toEqual(['.env', 'notes.md'])
+    expect(scan('gh gist edit 123 -a .env').files).toEqual(['.env'])
+    expect(scan('gh release create v1 .env "dist/app.zip#App"').files).toEqual(['.env', 'dist/app.zip'])
+    expect(scan('gh release upload v1 .env').files).toEqual(['.env'])
+    expect(scan('gh release create v1 -F notes.md').files).toEqual(['notes.md'])
+    expect(scan('gh pr create -t title -b body').files).toEqual([])
+  })
+
+  it('lets read-only gh calls use variables set by a substitution', () => {
+    for (const cmd of [
+      'export GH_TOKEN=$(gh auth token); R=o/r; gh api repos/$R/actions/runs --jq .total_count',
+      'R=$(git remote get-url origin); gh pr checks 2 --repo $R',
+      'gh pr view 2 --json body --jq "$(cat filter.jq)"',
+    ])
+      expect(scan(cmd), cmd).toEqual({ files: [], unresolved: [] })
+    expect(scan('R=$(cat .env); gh api repos/o/r/issues -f body="$R"').unresolved).not.toEqual([])
+    expect(scan('R=$(cat .env); gh pr comment 2 --body "$R"').unresolved).not.toEqual([])
+  })
+
+  it('blocks arguments built from stdin', () => {
+    expect(scan('echo .env | xargs git add -f').unresolved).not.toEqual([])
+    expect(scan('ls | parallel gh gist create').unresolved).not.toEqual([])
+    expect(scan('echo .env | xargs git status').unresolved).toEqual([])
+  })
+
+  it('ends a heredoc only on its exact delimiter line', () => {
+    expect(scan(`git commit -F - <<EOF\nEOF '\n$(cat .env)\nEOF`).unresolved).not.toEqual([])
+    expect(caught(`cat <<EOF\nEOF '\nEOF\ngit add -f .env`)).toBe(true)
+    expect(caught(`cat <<-EOF\n\tEOF\ngit add -f .env`)).toBe(true)
+  })
+
+  it('reads a comment that follows an operator without a space', () => {
+    expect(caught(`true;# it's\ngit add -f .env\n'`)).toBe(true)
+    expect(caught(`(true)# it's\ngit add -f .env\n'`)).toBe(true)
+  })
+
+  it('stays fast on input built to make a regex backtrack', () => {
+    const started = performance.now()
+    findSecretsInCommand(`echo${' git'.repeat(24_000)}`)
+    expect(performance.now() - started).toBeLessThan(1000)
+  })
+
+  it('stays fast when many publishers follow many other commands', () => {
+    const started = performance.now()
+    findSecretsInCommand(`${'x;'.repeat(40_000)}${'git commit -F m;'.repeat(1200)}`)
+    expect(performance.now() - started).toBeLessThan(2000)
   })
 })
