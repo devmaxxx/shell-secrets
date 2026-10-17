@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { findNewSecrets, findSecrets } from '../src'
-import { ALNUM, fake, p, rand, RULE_OF } from './fake'
+import { findNewSecrets, findSecrets } from '../../src'
+import { ALNUM, fake, p, rand, RULE_OF } from '../support/fake'
 
 const ids = (text: string): string[] => findSecrets(text).map(f => f.ruleId)
 

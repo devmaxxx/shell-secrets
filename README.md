@@ -340,7 +340,7 @@ pnpm lint
 pnpm typecheck
 ```
 
-Test fixtures are assembled at runtime in [`test/fake.ts`](./test/fake.ts) so the repository holds nothing secret-shaped. Keep it that way: build new fakes there instead of pasting tokens into tests.
+Test fixtures are assembled at runtime in [`test/support/fake.ts`](./test/support/fake.ts) so the repository holds nothing secret-shaped. Keep it that way: build new fakes there instead of pasting tokens into tests.
 
 ## License
 

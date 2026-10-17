@@ -2,7 +2,7 @@
 import { readFileSync } from 'node:fs'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
-import { main } from './agents'
+import { main } from './agent/main'
 
 process.exitCode = main(process.argv.slice(2), {
   stdin: () => readFileSync(0, 'utf8'),

@@ -1,6 +1,8 @@
-import type { Finding, Rule, ScanOptions } from './types'
+import type { Finding, Rule, ScanOptions } from '../types'
+import { defaultRules } from '../rules'
+import { findEncoded } from './base64'
 import { isPlaceholder } from './placeholder'
-import { defaultRules } from './rules'
+import { redact } from './redact'
 
 const runnable = new WeakMap<RegExp, RegExp>()
 
@@ -24,14 +26,6 @@ function prepared(rule: Rule, text: string): string {
     throw new Error(`shell-secrets: rule "${rule.id}" prepare() changed the text's length, so offsets would be wrong`)
   }
   return subject
-}
-
-// Below this a few leading characters are too large a share of the secret to show.
-const MIN_LENGTH_TO_SHOW_PREFIX = 20
-
-function redact(value: string): string {
-  const shown = value.length >= MIN_LENGTH_TO_SHOW_PREFIX ? 4 : 0
-  return `${value.slice(0, shown)}********`
 }
 
 function scanRule(rule: Rule, text: string): Finding[] {
@@ -87,7 +81,7 @@ export function findSecrets(text: string, options: ScanOptions = {}): Finding[] 
         found.push(f)
     }
   }
-  keep(findEncoded(text, rules))
+  keep(findEncoded(text, decoded => findSecrets(decoded, { rules })))
   for (const rule of rules.filter(rule => rule.fallback))
     keep(scanRule(rule, text))
   return found.sort((a, b) => a.start - b.start)
@@ -114,42 +108,6 @@ function overlapIndex(kept: readonly Finding[]): (f: Finding) => boolean {
     }
     return lo > 0 && reach[lo - 1]! > f.start
   }
-}
-
-const BASE64_BLOB = /(?<![\w+/=-])[\w+/-]{32,}={0,2}(?![\w+/=-])/g
-const PRINTABLE = /^[\t\n\r\x20-\x7E]*$/
-
-function decodeBase64(blob: string): string | null {
-  try {
-    const decoded = atob(blob.replace(/-/g, '+').replace(/_/g, '/').replace(/=+$/, ''))
-    return PRINTABLE.test(decoded) ? decoded : null
-  }
-  catch {
-    return null
-  }
-}
-
-// A Kubernetes Secret, a `base64 -d` pipeline or a Basic credential carries the
-// secret encoded. A blob that decodes to binary (a key body, a hash) is passed
-// over; one that decodes to text is scanned like any text, nested encodings
-// included, and each level is three quarters the size of the one above. The
-// finding spans the encoded text.
-function findEncoded(text: string, rules: readonly Rule[]): Finding[] {
-  const found: Finding[] = []
-  for (const match of text.matchAll(BASE64_BLOB)) {
-    const decoded = decodeBase64(match[0])
-    const inner = decoded === null ? undefined : findSecrets(decoded, { rules })[0]
-    if (!decoded || !inner)
-      continue
-    found.push({
-      ...inner,
-      name: `${inner.name}, base64-encoded`,
-      start: match.index,
-      end: match.index + match[0].length,
-      preview: redact(decoded.slice(inner.start, inner.end)),
-    })
-  }
-  return found
 }
 
 /**

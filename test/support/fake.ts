@@ -2,7 +2,7 @@
 // bodies, so this repo holds nothing secret-shaped for push protection to flag.
 // The generator is seeded: a truly random body now and then spells "fake" or
 // "xxxx" and is rightly read as a placeholder, which would make the suite flaky.
-import { withGitHubChecksum } from '../src/random'
+import { withGitHubChecksum } from '../../src/rules/checksum'
 
 export const ALNUM = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
 const UPPER_NUM = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'

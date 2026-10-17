@@ -1,6 +1,7 @@
-import type { Finding, ScanOptions } from './types'
-import { findSecretsInCommand, onlyWritesTo } from './command'
-import { findNewSecrets, findSecrets } from './scan'
+import type { Finding, ScanOptions } from '../types'
+import { findNewSecrets, findSecrets } from '../scan/find'
+import { findSecretsInCommand, onlyWritesTo } from '../shell/command'
+import { PATCH_FILE } from './constants'
 
 /** An agent's tool call, reduced to what decides whether it leaks a secret. */
 export type ToolCall
@@ -63,8 +64,6 @@ function checkShell(command: string, env: GuardEnv, options: ScanOptions): Findi
 function unscanned(source: string): Finding {
   return { ruleId: 'unscanned-published-file', name: 'published file it could not scan', env: null, start: 0, end: 0, preview: source }
 }
-
-const PATCH_FILE = /^\*\*\* (?:Add File|Update File|Move to): (.+)$/
 
 // Codex's apply_patch format: only the `+` lines of a hunk are new text, and
 // they land in the last file named, which a `Move to` line can change. Any

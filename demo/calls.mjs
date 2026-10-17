@@ -1,5 +1,5 @@
 // Writes the two tool calls the demo replays. The token is assembled here at
-// runtime so the repository holds nothing secret-shaped, as in test/fake.ts.
+// runtime so the repository holds nothing secret-shaped, as in test/support/fake.ts.
 // It carries the CRC32 checksum GitHub appends, without which it reads as made up.
 import { writeFileSync } from 'node:fs'
 import { crc32 } from 'node:zlib'

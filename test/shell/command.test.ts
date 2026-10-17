@@ -1,7 +1,7 @@
 import { basename } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { findSecretsInCommand, onlyWritesTo } from '../src'
-import { fake, rand } from './fake'
+import { findSecretsInCommand, onlyWritesTo } from '../../src'
+import { fake, rand } from '../support/fake'
 
 const ids = (cmd: string): string[] => findSecretsInCommand(cmd).findings.map(f => f.ruleId)
 

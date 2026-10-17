@@ -1,17 +1,7 @@
-import type { CommandFinding, CommandScan, ScanOptions } from './types'
-import { findSecrets } from './scan'
-import { COMMAND_PREFIX, hasSubstitution, scrubShell, segments, unquote, wordAt } from './shell'
-
-// Only the devices that cannot carry data off the machine. `/dev/tcp/…` and
-// `/dev/udp/…` are bash network sockets, and `/dev/../x` is an ordinary file.
-const HARMLESS_DEVICE = /^\/dev\/(?:null|zero|full|stdout|stderr|tty)$/
-
-// `>`, `>>`, `>|`, `&>`, `>&file` with an optional fd; `>&2` and `>&-` only
-// duplicate or close a descriptor and name no file.
-const REDIRECT = /(?:\d+|&)?>(?:>|\||&(?![\d-]))?(?!&[\d-])\s*/g
-const TEE = new RegExp(`^\\s*${COMMAND_PREFIX}tee(?=\\s|$)`)
-const BLANKS = /[ \t]*/y
-const REDIRECT_OPERATOR = /[<>]+[&|]?/y
+import type { CommandFinding, CommandScan, ScanOptions } from '../types'
+import { findSecrets } from '../scan/find'
+import { ADDS_ALL, ASSIGNMENT_BEFORE, ASSIGNMENT_LOOKBEHIND, BLANKS, CHANGES_DIRECTORY, EXPANDED_INLINE_INPUT, FILE_READER, FORCED_ADD, GIT_DIR_OPTION, HARMLESS_DEVICE, HEREDOC_INTO_CAT, INPUT_REDIRECT, LINE_COUNT, LITERAL_STDIN, MESSAGE_FILE_FLAG, PATHSPEC_FILE, PUBLISHES_FILE, REDIRECT, REDIRECT_OPERATOR, TEE } from './constants'
+import { hasSubstitution, scrubShell, segments, unquote, wordAt } from './parse'
 
 function skipBlanks(cmd: string, at: number): number {
   BLANKS.lastIndex = at
@@ -101,32 +91,6 @@ function isLiteralPath(path: string): boolean {
   return path !== '' && !/[~$`*?[{]/.test(path)
 }
 
-// Global options such as `-C dir` or `--no-pager` may sit between `git` and
-// its subcommand. `gh api -F` is a form field and `git grep -F` a fixed
-// string, so only the subcommands that publish a file are read.
-const PUBLISHES_FILE = new RegExp(
-  `^\\s*${COMMAND_PREFIX}(?:git(?:\\s+-\\S+(?:\\s+[^-\\s]\\S*)?)*?\\s+(?:commit|tag|notes|merge)|gh\\s+(?:pr|issue|release))(?![\\w-])`,
-)
-// `-F` may be bundled (`-aF msg`) or glued to its value (`-Fmsg`). After a
-// letter that takes a value (`-mF` is the message "F") the rest is that value.
-const MESSAGE_FILE_FLAG = /(?<=^|\s)(?:-(?:(?![mCctuS])[A-Za-z])*?F|--(?:file|body-file|notes-file)(?=[=\s]))=?\s*/g
-
-const FORCED_ADD = new RegExp(`^\\s*${COMMAND_PREFIX}git(?:\\s+-\\S+(?:\\s+[^-\\s]\\S*)?)*?\\s+add(?=\\s)`)
-// `-A` with no pathspec stages the whole tree; `-u` touches tracked files only,
-// which .gitignore never kept out. A pathspec file names files this cannot see.
-const ADDS_ALL = /^(?:-[B-Za-z]*A[A-Za-z]*|--all)$/
-const PATHSPEC_FILE = /^--pathspec-from-file(?:=|$)/
-const GIT_DIR_OPTION = /\sgit\s(?:.*\s)?-C\s/
-const FILE_READER = new RegExp(`^\\s*${COMMAND_PREFIX}(?:cat|head|tail)(?=\\s)`)
-const HEREDOC_INTO_CAT = new RegExp(`^\\s*${COMMAND_PREFIX}cat(?:\\s+\\d?>>?\\s*\\S+)?\\s+<<-?\\s*(?<quote>['"]?)\\w+\\k<quote>`)
-// A heredoc or here-string the shell expands: `$(cat .env)` in its body is read.
-const EXPANDED_INLINE_INPUT = /<<<|<<-?\s*\w/
-const LITERAL_STDIN = new RegExp(`^\\s*${COMMAND_PREFIX}(?:echo|printf)(?=\\s|$)`)
-const CHANGES_DIRECTORY = new RegExp(`^\\s*${COMMAND_PREFIX}(?:cd|pushd|popd)(?=\\s|$)`)
-const INPUT_REDIRECT = /(?<![<\d])\d?<(?![<(&])\s*/g
-// `head -n 5` and `tail -n +2` count lines; the count is not a file.
-const LINE_COUNT = /^[+-]?\d+[bkm]?$/i
-
 interface Segment { readonly start: number, readonly text: string }
 
 /**
@@ -135,6 +99,8 @@ interface Segment { readonly start: number, readonly text: string }
  * unscanned.
  */
 interface Published { files: string[], unresolved: string[] }
+
+const publishes = (files: string[] = [], unresolved: string[] = []): Published => ({ files, unresolved })
 
 /** The operands after `at` that are not options, as the shell would pass them. */
 function operands(cmd: string, at: number, end: number): string[] {
@@ -188,15 +154,15 @@ function stdinSource(cmd: string, scrubbed: string, segment: Segment, all: reado
   const previous = all[all.indexOf(segment) - 1]
   const redirected = inputRedirects(cmd, segment)
   if (redirected.length > 0)
-    return { files: redirected, unresolved: [] }
+    return publishes(redirected)
   if (!isPipedFrom(scrubbed, segment, previous)) {
     const original = textOf(cmd, segment)
     return EXPANDED_INLINE_INPUT.test(original) && /[$`]/.test(original)
-      ? { files: [], unresolved: [original.trim()] }
-      : { files: [], unresolved: [] }
+      ? publishes([], [original.trim()])
+      : publishes()
   }
   if (isLiteralStage(cmd, scrubbed, previous, all))
-    return { files: [], unresolved: [] }
+    return publishes()
   const reader = FILE_READER.exec(previous.text)
   const files = reader
     ? [
@@ -204,19 +170,28 @@ function stdinSource(cmd: string, scrubbed: string, segment: Segment, all: reado
         ...inputRedirects(cmd, previous),
       ]
     : []
-  return files.length > 0 ? { files, unresolved: [] } : { files: [], unresolved: [cmd.slice(previous.start, segment.start + segment.text.length).trim()] }
+  return files.length > 0 ? publishes(files) : publishes([], [cmd.slice(previous.start, segment.start + segment.text.length).trim()])
 }
 
 function forcedAdd(cmd: string, segment: Segment, add: RegExpExecArray): Published {
   const flags = segment.text.slice(add[0].length).split(/\s+/)
   if (!flags.some(word => /^(?:--force|-[A-EG-Z]*F[A-Z]*)$/i.test(word)))
-    return { files: [], unresolved: [] }
+    return publishes()
   if (flags.some(word => PATHSPEC_FILE.test(word)))
-    return { files: [], unresolved: [segment.text.trim()] }
+    return publishes([], [segment.text.trim()])
   const files = operands(cmd, segment.start + add[0].length, segment.start + segment.text.length)
   if (files.length === 0)
-    return { files: flags.some(word => ADDS_ALL.test(word)) ? ['.'] : [], unresolved: [] }
-  return { files, unresolved: [] }
+    return publishes(flags.some(word => ADDS_ALL.test(word)) ? ['.'] : [])
+  return publishes(files)
+}
+
+// Each `-F` / `--body-file` names a file, or `-` for stdin.
+function flaggedFiles(cmd: string, scrubbed: string, segment: Segment, all: readonly Segment[]): Published {
+  const sources = [...segment.text.matchAll(MESSAGE_FILE_FLAG)].map((m) => {
+    const path = unquote(wordAt(cmd, segment.start + m.index + m[0].length))
+    return path === '-' ? stdinSource(cmd, scrubbed, segment, all) : publishes([path])
+  })
+  return publishes(sources.flatMap(s => s.files), sources.flatMap(s => s.unresolved))
 }
 
 /**
@@ -233,7 +208,7 @@ function forcedAdd(cmd: string, segment: Segment, add: RegExpExecArray): Publish
 function messageFiles(cmd: string, scrubbed: string): Published {
   const all = segments(scrubbed).filter(segment => segment.text.trim() !== '')
   const writes = writeTargets(cmd, scrubbed)
-  const published: Published = { files: [], unresolved: [] }
+  const published = publishes()
   let moved = false
   all.forEach((segment, index) => {
     const { start, text } = segment
@@ -244,13 +219,7 @@ function messageFiles(cmd: string, scrubbed: string): Published {
     const add = FORCED_ADD.exec(text)
     const found = add
       ? forcedAdd(cmd, segment, add)
-      : !PUBLISHES_FILE.test(text)
-          ? { files: [], unresolved: [] }
-          : [...text.matchAll(MESSAGE_FILE_FLAG)].reduce<Published>((acc, m) => {
-              const path = unquote(wordAt(cmd, start + m.index + m[0].length))
-              const next = path === '-' ? stdinSource(cmd, scrubbed, segment, all) : { files: [path], unresolved: [] }
-              return { files: [...acc.files, ...next.files], unresolved: [...acc.unresolved, ...next.unresolved] }
-            }, { files: [], unresolved: [] })
+      : PUBLISHES_FILE.test(text) ? flaggedFiles(cmd, scrubbed, segment, all) : publishes()
     const elsewhere = moved || GIT_DIR_OPTION.test(` ${text}`)
     for (const path of found.files.filter(path => path !== '' && path !== '-')) {
       const writer = writes.filter(t => t.path === path && t.at < start).at(-1)
@@ -284,11 +253,6 @@ function mayChange(cmd: string, segment: Segment, path: string): boolean {
     return false
   return operands(cmd, segment.start, segment.start + segment.text.length).some(word => normalise(word) === normalise(path))
 }
-
-// `&` and `;` are left out of the boundary: unspaced, they are far more often a
-// URI's `&password=` or a JDBC `;password=` than a shell operator.
-const ASSIGNMENT_BEFORE = /(?:^|[\s("'])([A-Z_]\w*)=["']?$/i
-const ASSIGNMENT_LOOKBEHIND = 256
 
 function assignedVariable(cmd: string, start: number): string | undefined {
   const before = cmd.slice(Math.max(0, start - ASSIGNMENT_LOOKBEHIND), start)
