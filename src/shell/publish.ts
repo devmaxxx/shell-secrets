@@ -1,5 +1,5 @@
 import type { Heredoc, Segment } from './parse'
-import { ARGUMENTS_FROM_STDIN, CAT_HEREDOC, CLOSING_PAREN, FIELD_FROM_FILE, GH_GRAMMARS, GIT_GRAMMARS, GIT_PLACE_OPTION, GIT_VALUED_GLOBAL, LITERAL_ECHO, REDIRECT_OPERATOR, SHELL_COMMAND_OPTION, SHELLS } from './constants'
+import { ARGUMENTS_FROM_STDIN, CAT_HEREDOC, CLOSING_PAREN, FIELD_FROM_FILE, GH_GRAMMARS, GH_WRITES, GIT_GRAMMARS, GIT_PLACE_OPTION, GIT_VALUED_GLOBAL, LITERAL_ECHO, REDIRECT_OPERATOR, SHELL_COMMAND_OPTION, SHELLS } from './constants'
 import { heredocAt, skipBlanks, unquote, wordAt } from './parse'
 
 type LongOption = readonly [name: string, shortestPrefix: number, valued: boolean]
@@ -163,12 +163,14 @@ function gh(words: readonly Word[], fromStdin: boolean, text: string): Publicati
   const [group = '', sub = ''] = words.map(w => w.value)
   const key = group === 'pr' || group === 'issue' || group === 'api' ? group : `${group} ${sub}`
   const grammar = GH_GRAMMARS[key]
-  if (!grammar)
+  if (!grammar || ((key === 'pr' || key === 'issue') && !GH_WRITES.has(sub)))
     return NOTHING
   if (fromStdin)
     return { ...NOTHING, publishes: true, content: true, unresolved: [text] }
   const parsed = parse(words.slice(key === group ? 1 : 2), grammar)
-  const publication: Publication = { ...NOTHING, publishes: true, content: true, files: [], unresolved: [] }
+  // `gh api` without a field or an input only reads.
+  const content = key !== 'api' || has(parsed, 'F', 'f', 'field', 'raw-field', 'input')
+  const publication: Publication = { ...NOTHING, publishes: true, content, files: [], unresolved: [] }
   optionFiles(parsed, grammar, publication, text)
   // A release asset may carry a display label after `#`.
   const assets = parsed.operands.slice(key === 'pr' || key === 'issue' ? parsed.operands.length : 1).map(path => path.replace(/#[^/]*$/, ''))

@@ -429,6 +429,17 @@ describe('publishers the shell hides behind quoting, wrappers and substitutions'
     expect(scan('gh pr create -t title -b body').files).toEqual([])
   })
 
+  it('lets read-only gh calls use variables set by a substitution', () => {
+    for (const cmd of [
+      'export GH_TOKEN=$(gh auth token); R=o/r; gh api repos/$R/actions/runs --jq .total_count',
+      'R=$(git remote get-url origin); gh pr checks 2 --repo $R',
+      'gh pr view 2 --json body --jq "$(cat filter.jq)"',
+    ])
+      expect(scan(cmd), cmd).toEqual({ files: [], unresolved: [] })
+    expect(scan('R=$(cat .env); gh api repos/o/r/issues -f body="$R"').unresolved).not.toEqual([])
+    expect(scan('R=$(cat .env); gh pr comment 2 --body "$R"').unresolved).not.toEqual([])
+  })
+
   it('blocks arguments built from stdin', () => {
     expect(scan('echo .env | xargs git add -f').unresolved).not.toEqual([])
     expect(scan('ls | parallel gh gist create').unresolved).not.toEqual([])

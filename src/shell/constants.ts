@@ -148,6 +148,9 @@ export const GIT_GRAMMARS: Readonly<Record<string, Grammar>> = {
 const GH_BODY: Grammar = { short: 'aBbFHlmprtTR', long: [['body-file', 0, true], ['body', 0, true], ['title', 0, true], ['base', 0, true], ['head', 0, true], ['repo', 0, true]], files: ['F', 'body-file'] }
 const GH_RELEASE: Grammar = { short: 'nFtR', long: [['notes-file', 0, true], ['notes', 0, true], ['title', 0, true], ['target', 0, true], ['repo', 0, true], ['discussion-category', 0, true], ['notes-start-tag', 0, true]], files: ['F', 'notes-file'] }
 
+// The `gh pr` and `gh issue` subcommands that send text.
+export const GH_WRITES = new Set(['create', 'edit', 'comment', 'review', 'merge', 'close'])
+
 export const GH_GRAMMARS: Readonly<Record<string, Grammar>> = {
   'pr': GH_BODY,
   'issue': GH_BODY,
