@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
+import { linkSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -46,11 +46,42 @@ describe('cli', () => {
     expect(write('.env')).toBe(2)
   })
 
+  it('does not exempt an ignored name hard-linked to a tracked file', () => {
+    const repo = mkdtempSync(join(tmpdir(), 'ss-repo-'))
+    spawnSync('git', ['init', '-q', repo])
+    writeFileSync(join(repo, '.gitignore'), '.env\n')
+    writeFileSync(join(repo, 'app.js'), '')
+    linkSync(join(repo, 'app.js'), join(repo, '.env'))
+    expect(run(['hook'], JSON.stringify({ tool_name: 'Write', tool_input: { file_path: '.env', content: fake.github() }, cwd: repo }))).toBe(2)
+  })
+
+  it('blocks a field of the wrong type instead of reading it as empty', () => {
+    expect(run(['hook'], JSON.stringify({ tool_name: 'Bash', tool_input: { command: ['echo', fake.github()] } }))).toBe(2)
+    expect(run(['hook'], JSON.stringify({ tool_name: 'Write', tool_input: { file_path: 'a.js', content: { text: fake.github() } } }))).toBe(2)
+  })
+
+  it('reads a payload larger than one pipe buffer from the built cli', () => {
+    const cli = join(import.meta.dirname, '../../dist/cli.mjs')
+    const payload = JSON.stringify({ tool_name: 'Write', tool_input: { file_path: 'a.js', content: `${'x\n'.repeat(40_000)}${fake.github()}` } })
+    const result = spawnSync(process.execPath, [cli, 'hook'], { input: payload })
+    expect(result.status).toBe(2)
+  })
+
+  it('blocks when a project install runs where npx or the package is missing', () => {
+    const home = mkdtempSync(join(tmpdir(), 'ss-'))
+    vi.spyOn(process, 'cwd').mockReturnValue(home)
+    run(['install', 'codex', '--project'], '', home)
+    const command = JSON.parse(readFileSync(join(home, '.codex/hooks.json'), 'utf8')).hooks.PreToolUse[0].hooks[0].command
+    expect(spawnSync('/bin/sh', ['-c', command], { env: { PATH: '/nonexistent' } }).status).toBe(2)
+  })
+
   it('leaves a user hook that only mentions shell-secrets, and entries it does not understand', () => {
     const home = mkdtempSync(join(tmpdir(), 'ss-'))
     const file = join(home, '.claude/settings.json')
     const others = [
       { matcher: 'Bash', hooks: [{ type: 'command', command: '/src/shell-secrets-audit/log.sh' }] },
+      { matcher: 'Bash', hooks: [{ type: 'command', command: `node '/opt/shell-secrets-audit/log.mjs' hook` }] },
+      { matcher: 'Bash', hooks: [{ type: 'command', command: 'npx --no-install shell-secrets-audit hook' }] },
       { matcher: 'Bash' },
       { matcher: 'Bash', hooks: [{ type: 'prompt', prompt: 'safe?' }] },
     ]
@@ -66,10 +97,10 @@ describe('cli', () => {
     vi.stubEnv('HOME', home)
     main(['install', 'claude'], { stdin: () => '', script: `/opt/cost$5/it's/cli.mjs` })
     const command = JSON.parse(readFileSync(join(home, '.claude/settings.json'), 'utf8')).hooks.PreToolUse[0].hooks[0].command
-    expect(spawnSync('sh', ['-c', `printf %s ${command.slice(5, -5)}`]).stdout.toString()).toBe(`/opt/cost$5/it's/cli.mjs`)
+    expect(spawnSync('sh', ['-c', `printf %s ${command.slice(5, -15)}`]).stdout.toString()).toBe(`/opt/cost$5/it's/cli.mjs`)
     vi.spyOn(process, 'cwd').mockReturnValue(home)
     run(['install', 'codex', '--project'], '', home)
-    expect(JSON.parse(readFileSync(join(home, '.codex/hooks.json'), 'utf8')).hooks.PreToolUse[0].hooks[0].command).toBe('npx --no-install shell-secrets hook')
+    expect(JSON.parse(readFileSync(join(home, '.codex/hooks.json'), 'utf8')).hooks.PreToolUse[0].hooks[0].command).toBe('npx --no-install shell-secrets hook || exit 2')
   })
 
   it('scans the ignored files a forced add of a directory or the whole tree stages', () => {
@@ -105,9 +136,18 @@ describe('cli', () => {
     run(['install', 'claude'], '', home)
     const twice = JSON.parse(readFileSync(file, 'utf8')).hooks.PreToolUse
     expect(twice).toHaveLength(2)
-    expect(twice[1]).toMatchObject({ matcher: 'Bash|Write|Edit|MultiEdit|NotebookEdit', hooks: [{ command: `node '/opt/shell-secrets/cli.mjs' hook` }] })
+    expect(twice[1]).toMatchObject({ matcher: 'Bash|Write|Edit|MultiEdit|NotebookEdit', hooks: [{ command: `node '/opt/shell-secrets/cli.mjs' hook || exit 2` }] })
     run(['uninstall', 'claude'], '', home)
     expect(JSON.parse(readFileSync(file, 'utf8')).hooks.PreToolUse).toEqual([other])
+  })
+
+  it('replaces an entry written before the hook command failed closed', () => {
+    const home = mkdtempSync(join(tmpdir(), 'ss-'))
+    const file = join(home, '.claude/settings.json')
+    mkdirSync(join(home, '.claude'))
+    writeFileSync(file, JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: `node '/opt/shell-secrets/cli.mjs' hook` }] }] } }))
+    run(['install', 'claude'], '', home)
+    expect(JSON.parse(readFileSync(file, 'utf8')).hooks.PreToolUse).toHaveLength(1)
   })
 
   it('writes the Codex matcher to hooks.json', () => {

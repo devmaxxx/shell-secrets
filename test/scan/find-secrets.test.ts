@@ -263,6 +263,10 @@ describe('a secret-named value that is not a secret', () => {
     })
   }
 
+  it('reads the punctuation password generators emit as part of a generic value', () => {
+    expect(ids(`db_password = "${rand(6)}&${rand(5)}?${rand(5)}$${rand(4)}|${rand(4)}:x"`)).toEqual(['generic-secret'])
+  })
+
   it('still reports the shapes a filter could mistake for one of these', () => {
     const value = rand(28)
     expect(ids(`https://ci:${value}@nexus:8081/repo`)).toEqual(['url-password'])

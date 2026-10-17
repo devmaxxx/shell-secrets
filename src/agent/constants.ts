@@ -3,7 +3,9 @@ export const AGENTS = {
   codex: { dir: '.codex', file: 'hooks.json', matcher: 'Bash|apply_patch' },
 } as const
 
-export const OWN_HOOK = /^(?:node .*shell-secrets.* |npx --no-install shell-secrets )hook$/
+// The exact commands hookCommand writes, past and present, so a user hook that
+// merely mentions shell-secrets is never taken for one.
+export const OWN_HOOK = /^(?:node '(?:[^']|'\\'')*shell-secrets(?:[^']|'\\'')*\/cli\.mjs' hook|npx --no-install shell-secrets hook)(?: \|\| exit 2)?$/
 
 export const USAGE = `Usage:
   shell-secrets install <claude|codex> [--project]   add the PreToolUse hook

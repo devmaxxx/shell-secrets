@@ -1,12 +1,9 @@
 import type { CommandFinding, CommandScan, ScanOptions } from '../types'
+import type { Segment } from './parse'
 import { findSecrets } from '../scan/find'
-import { ADDS_ALL, ASSIGNMENT_BEFORE, ASSIGNMENT_LOOKBEHIND, BLANKS, CHANGES_DIRECTORY, EXPANDED_INLINE_INPUT, FILE_READER, FORCED_ADD, GIT_DIR_OPTION, HARMLESS_DEVICE, HEREDOC_INTO_CAT, INPUT_REDIRECT, LINE_COUNT, LITERAL_STDIN, MESSAGE_FILE_FLAG, PATHSPEC_FILE, PUBLISHES_FILE, REDIRECT, REDIRECT_OPERATOR, TEE } from './constants'
-import { hasSubstitution, scrubShell, segments, unquote, wordAt } from './parse'
-
-function skipBlanks(cmd: string, at: number): number {
-  BLANKS.lastIndex = at
-  return at + BLANKS.exec(cmd)![0].length
-}
+import { ASSIGNMENT_BEFORE, ASSIGNMENT_LOOKBEHIND, CHANGES_DIRECTORY, EXPANDED_INLINE_INPUT, EXPANDS_VARIABLE, FILE_READER, HARMLESS_DEVICE, HEREDOC_INTO_CAT, INPUT_REDIRECT, LINE_COUNT, LITERAL_STDIN, MAX_COMMAND_LENGTH, MAX_SCRIPT_DEPTH, READS_INTO_VARIABLE, REDIRECT, REDIRECT_OPERATOR, TEE } from './constants'
+import { hasSubstitution, scrubShell, segments, skipBlanks, unquote, wordAt } from './parse'
+import { hasOpaqueSubstitution, publicationOf } from './publish'
 
 interface Target { readonly at: number, readonly path: string }
 
@@ -91,8 +88,6 @@ function isLiteralPath(path: string): boolean {
   return path !== '' && !/[~$`*?[{]/.test(path)
 }
 
-interface Segment { readonly start: number, readonly text: string }
-
 /**
  * Where `messageFiles` leads: files to read, and the sources a command
  * publishes that cannot be pinned to one file, which the caller must treat as
@@ -173,26 +168,7 @@ function stdinSource(cmd: string, scrubbed: string, segment: Segment, all: reado
   return files.length > 0 ? publishes(files) : publishes([], [cmd.slice(previous.start, segment.start + segment.text.length).trim()])
 }
 
-function forcedAdd(cmd: string, segment: Segment, add: RegExpExecArray): Published {
-  const flags = segment.text.slice(add[0].length).split(/\s+/)
-  if (!flags.some(word => /^(?:--force|-[A-EG-Z]*F[A-Z]*)$/i.test(word)))
-    return publishes()
-  if (flags.some(word => PATHSPEC_FILE.test(word)))
-    return publishes([], [segment.text.trim()])
-  const files = operands(cmd, segment.start + add[0].length, segment.start + segment.text.length)
-  if (files.length === 0)
-    return publishes(flags.some(word => ADDS_ALL.test(word)) ? ['.'] : [])
-  return publishes(files)
-}
-
-// Each `-F` / `--body-file` names a file, or `-` for stdin.
-function flaggedFiles(cmd: string, scrubbed: string, segment: Segment, all: readonly Segment[]): Published {
-  const sources = [...segment.text.matchAll(MESSAGE_FILE_FLAG)].map((m) => {
-    const path = unquote(wordAt(cmd, segment.start + m.index + m[0].length))
-    return path === '-' ? stdinSource(cmd, scrubbed, segment, all) : publishes([path])
-  })
-  return publishes(sources.flatMap(s => s.files), sources.flatMap(s => s.unresolved))
-}
+const normalise = (path: string): string => path.replace(/^(?:\.\/)+/, '')
 
 /**
  * The files git and gh publish verbatim, and `git add -f` stages: .gitignore
@@ -204,11 +180,28 @@ function flaggedFiles(cmd: string, scrubbed: string, segment: Segment, all: read
  * place. A file the command writes first is left out when the writer is a
  * literal `echo` or `printf`, whose text is scanned as part of the command;
  * written any other way, its contents are unknown until the command runs.
+ * Shell code run through `bash -c`, `eval` or a heredoc is read the same way.
  */
-function messageFiles(cmd: string, scrubbed: string): Published {
+function messageFiles(cmd: string, scrubbed: string, depth = 0): Published {
   const all = segments(scrubbed).filter(segment => segment.text.trim() !== '')
+  const found = all.map(segment => publicationOf(cmd, segment))
   const writes = writeTargets(cmd, scrubbed)
   const published = publishes()
+  // `cp .env msg && git commit -F msg`, `dd of=msg` or a script that writes
+  // 'msg': a command that mentions the file can change it, so neither the
+  // disk's bytes nor an earlier literal write are what gets published. A
+  // reader, a `tee` and a literal echo write only through redirects, which are
+  // tracked. Built once: a long command line asks about many paths.
+  let changers: (string | null)[] | undefined
+  const changedBefore = (index: number, path: string): boolean => {
+    changers ??= all.map((segment, i) => found[i]!.publishes || FILE_READER.test(segment.text) || TEE.test(segment.text) || isLiteralStage(cmd, scrubbed, segment, all) ? null : textOf(cmd, segment))
+    const name = normalise(path).split('/').filter(Boolean).at(-1) ?? path
+    for (let i = 0; i < index; i++) {
+      if (changers[i]?.includes(name))
+        return true
+    }
+    return false
+  }
   let moved = false
   all.forEach((segment, index) => {
     const { start, text } = segment
@@ -216,14 +209,10 @@ function messageFiles(cmd: string, scrubbed: string): Published {
       moved = true
       return
     }
-    const add = FORCED_ADD.exec(text)
-    const found = add
-      ? forcedAdd(cmd, segment, add)
-      : PUBLISHES_FILE.test(text) ? flaggedFiles(cmd, scrubbed, segment, all) : publishes()
-    const elsewhere = moved || GIT_DIR_OPTION.test(` ${text}`)
-    for (const path of found.files.filter(path => path !== '' && path !== '-')) {
-      const writer = writes.filter(t => t.path === path && t.at < start).at(-1)
-      if (all.slice(0, index).some(before => mayChange(cmd, before, path)))
+    const publication = found[index]!
+    const place = (path: string, elsewhere: boolean): void => {
+      const writer = writes.filter(t => normalise(t.path) === normalise(path) && t.at < start).at(-1)
+      if (changedBefore(index, path))
         published.unresolved.push(path)
       else if (writer)
         isLiteralWrite(cmd, scrubbed, all, writer) || published.unresolved.push(path)
@@ -232,26 +221,40 @@ function messageFiles(cmd: string, scrubbed: string): Published {
       else
         published.files.push(path)
     }
-    published.unresolved.push(...found.unresolved)
+    for (const script of publication.scripts) {
+      const inner = depth < MAX_SCRIPT_DEPTH ? messageFiles(script, scrubShell(script), depth + 1) : publishes([], [script.trim()])
+      published.unresolved.push(...inner.unresolved)
+      inner.files.forEach(path => place(path, moved))
+    }
+    if (publication.content && hasHiddenContent(cmd, scrubbed, segment))
+      published.unresolved.push(text.trim())
+    for (const path of publication.files) {
+      if (path === '-') {
+        const piped = stdinSource(cmd, scrubbed, segment, all)
+        published.files.push(...piped.files)
+        published.unresolved.push(...piped.unresolved)
+        continue
+      }
+      place(path, moved || publication.elsewhere)
+    }
+    published.unresolved.push(...publication.unresolved)
   })
   return published
+}
+
+// `git commit -m "$(cat .env)"` publishes the substitution's output, and
+// `k=$(cat .env); git commit -m "$k"` the variable it fills.
+function hasHiddenContent(cmd: string, scrubbed: string, segment: Segment): boolean {
+  if (hasOpaqueSubstitution(cmd, segment.start))
+    return true
+  const own = cmd.slice(segment.start, segment.start + segment.text.length)
+  return EXPANDS_VARIABLE.test(own)
+    && (hasOpaqueSubstitution(cmd, 0, segment.start) || READS_INTO_VARIABLE.test(scrubbed.slice(0, segment.start)))
 }
 
 function isLiteralWrite(cmd: string, scrubbed: string, all: readonly Segment[], target: Target): boolean {
   const writer = all.filter(segment => segment.start <= target.at).at(-1)
   return writer !== undefined && isLiteralStage(cmd, scrubbed, writer, all)
-}
-
-const normalise = (path: string): string => path.replace(/^(?:\.\/)+/, '')
-
-// `cp .env msg && git commit -F msg`: a command that names the file can change
-// it, so neither the disk's bytes nor an earlier literal write are what gets
-// published. A reader, a `tee` (whose writes are tracked) and another publisher
-// leave it as it is.
-function mayChange(cmd: string, segment: Segment, path: string): boolean {
-  if (FILE_READER.test(segment.text) || TEE.test(segment.text) || PUBLISHES_FILE.test(segment.text) || FORCED_ADD.test(segment.text))
-    return false
-  return operands(cmd, segment.start, segment.start + segment.text.length).some(word => normalise(word) === normalise(path))
 }
 
 function assignedVariable(cmd: string, start: number): string | undefined {
@@ -277,6 +280,9 @@ export function findSecretsInCommand(cmd: string, options: ScanOptions = {}): Co
     const variable = assignedVariable(cmd, finding.start)
     return variable ? { ...finding, variable } : finding
   })
+  if (cmd.length > MAX_COMMAND_LENGTH) {
+    return { findings, redirectTargets: [], messageFiles: [], unresolvedSources: [`a command over ${MAX_COMMAND_LENGTH} characters`] }
+  }
   const scrubbed = scrubShell(cmd)
   const published = messageFiles(cmd, scrubbed)
   return {
@@ -297,7 +303,7 @@ export function findSecretsInCommand(cmd: string, options: ScanOptions = {}): Co
  * cannot be predicted; `accept` is not called for those.
  */
 export function onlyWritesTo(cmd: string, accept: (path: string) => boolean): boolean {
-  if (typeof cmd !== 'string') {
+  if (typeof cmd !== 'string' || cmd.length > MAX_COMMAND_LENGTH) {
     return false
   }
   const scrubbed = scrubShell(cmd)

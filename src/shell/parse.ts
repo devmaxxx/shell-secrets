@@ -1,4 +1,4 @@
-import { OPAQUE, SEGMENT, WORD } from './constants'
+import { BLANKS, HEREDOC_DELIMITER, OPAQUE, SEGMENT, WORD } from './constants'
 
 const blank = (text: string): string => '_'.repeat(text.length)
 
@@ -11,20 +11,23 @@ function blankStretch(all: string): string {
   if (all.startsWith('#')) {
     return ' '.repeat(all.length)
   }
-  if (/^\s#/.test(all)) {
+  if (/^[\s;&|()]#/.test(all)) {
     return all[0] + ' '.repeat(all.length - 1)
   }
   return blank(all)
 }
 
 /**
- * Where each heredoc terminator could be: for every word that starts a line,
- * the offsets just past it. Built once, so a run of unterminated `<<` openers
- * stays linear instead of each one searching the rest of the text.
+ * Where each heredoc terminator could be: for every line that is one bare
+ * word, the offset just past it. Bash ends a heredoc only on a line that is
+ * exactly its delimiter (`<<-` also strips leading tabs), so a line that merely
+ * starts with it, like `EOF '`, must not end one: its stray quote would hide
+ * the code after it. Built once, so a run of unterminated `<<` openers stays
+ * linear instead of each one searching the rest of the text.
  */
-function lineLeaders(cmd: string): Map<string, number[]> {
+function lineLeaders(cmd: string, pattern: RegExp): Map<string, number[]> {
   const leaders = new Map<string, number[]>()
-  for (const m of cmd.matchAll(/^[ \t]*(\w+)/gm)) {
+  for (const m of cmd.matchAll(pattern)) {
     const ends = leaders.get(m[1]!) ?? []
     ends.push(m.index + m[0].length)
     leaders.set(m[1]!, ends)
@@ -64,7 +67,8 @@ function firstAtOrAfter(sorted: readonly number[] | undefined, from: number): nu
  */
 export function scrubShell(cmd: string): string {
   const opaque = new RegExp(OPAQUE)
-  const leaders = lineLeaders(cmd)
+  const exact = lineLeaders(cmd, /^(\w+)$/gm)
+  const tabbed = lineLeaders(cmd, /^\t*(\w+)$/gm)
   let out = ''
   let copied = 0
   for (let m = opaque.exec(cmd); m; m = opaque.exec(cmd)) {
@@ -76,6 +80,7 @@ export function scrubShell(cmd: string): string {
     }
     else {
       // The body starts on the next line; the terminator may be its first line.
+      const leaders = opener.startsWith('<<-') ? tabbed : exact
       const terminatorEnd = firstAtOrAfter(leaders.get(word!), end)
       if (terminatorEnd === undefined) {
         opaque.lastIndex = m.index + 2
@@ -91,8 +96,10 @@ export function scrubShell(cmd: string): string {
   return out + cmd.slice(copied)
 }
 
+export interface Segment { readonly start: number, readonly text: string }
+
 /** Every stretch between `;`, `&`, `|`, newlines, subshells and backticks, with its offset. */
-export function segments(scrubbed: string): { start: number, text: string }[] {
+export function segments(scrubbed: string): Segment[] {
   return [...scrubbed.matchAll(SEGMENT)].map(m => ({ start: m.index, text: m[0] }))
 }
 
@@ -108,7 +115,7 @@ export function wordAt(cmd: string, index: number): string {
  */
 export function unquote(word: string): string {
   return word.replace(
-    /"((?:[^"\\]|\\[\s\S])*)"|'([^']*)'|\\([\s\S])/g,
+    /\$?"((?:[^"\\]|\\[\s\S])*)"|\$?'([^']*)'|\\([\s\S])/g,
     (_all, double: string | undefined, single: string | undefined, escaped: string | undefined) =>
       double !== undefined ? double.replace(/\\(["\\$`])/g, '$1') : (single ?? escaped)!,
   )
@@ -116,4 +123,40 @@ export function unquote(word: string): string {
 
 export function hasSubstitution(cmd: string): boolean {
   return /\$\(|`/.test(cmd)
+}
+
+export function skipBlanks(cmd: string, at: number): number {
+  BLANKS.lastIndex = at
+  return at + BLANKS.exec(cmd)![0].length
+}
+
+export interface Heredoc {
+  readonly body: string
+  /** Offset just past the terminator line. */
+  readonly end: number
+  /** A quoted delimiter keeps the body literal; a bare one expands `$(…)` in it. */
+  readonly quoted: boolean
+  /** Whatever follows the delimiter on its own line. */
+  readonly rest: string
+}
+
+/** The heredoc whose `<<` ends just before `at`, or `null` when it is not terminated. */
+export function heredocAt(cmd: string, at: number): Heredoc | null {
+  HEREDOC_DELIMITER.lastIndex = at
+  const delimiter = HEREDOC_DELIMITER.exec(cmd)
+  const lineEnd = cmd.indexOf('\n', at)
+  if (!delimiter || lineEnd < 0)
+    return null
+  const [all, dash, quote, word] = delimiter
+  const terminator = new RegExp(`^${dash ? '\\t*' : ''}${word}$`, 'm')
+  const body = cmd.slice(lineEnd + 1)
+  const found = terminator.exec(body)
+  if (!found)
+    return null
+  return {
+    body: body.slice(0, found.index),
+    end: lineEnd + 1 + found.index + found[0].length,
+    quoted: quote !== '' || all.includes('\\'),
+    rest: cmd.slice(at + all.length, lineEnd),
+  }
 }

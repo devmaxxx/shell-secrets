@@ -15,7 +15,7 @@ export interface CliIO {
 export function main(argv: string[], io: CliIO): number {
   const [command, agent, ...flags] = argv
   if (command === 'hook')
-    return runHook(io.stdin())
+    return runHook(io.stdin)
   if ((command === 'install' || command === 'uninstall') && (agent === 'claude' || agent === 'codex')) {
     const project = flags.includes('--project')
     const file = configFile(agent, project)

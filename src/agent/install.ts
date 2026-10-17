@@ -18,9 +18,12 @@ export function configFile(agent: Agent, project: boolean): string {
 }
 
 // A project config is committed, so it names the package, not this machine's
-// path to it. Single quotes keep the shell from expanding a `$` in the path.
+// path to it. A missing package or a moved script exits 1, which would let
+// every call run, so that becomes a block. Single quotes keep the shell from
+// expanding a `$` in the path.
 export function hookCommand(script: string, project: boolean): string {
-  return project ? 'npx --no-install shell-secrets hook' : `node '${script.replaceAll('\'', `'\\''`)}' hook`
+  const command = project ? 'npx --no-install shell-secrets hook' : `node '${script.replaceAll('\'', `'\\''`)}' hook`
+  return `${command} || exit 2`
 }
 
 function isOwnHook(hook: { command?: unknown }): boolean {

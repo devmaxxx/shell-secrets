@@ -12,7 +12,7 @@ export function gitEnv(cwd: string): GuardEnv {
     // links, so the file a write would really land in is the one asked about.
     isIgnored: (path) => {
       const full = landsIn(resolve(cwd, path))
-      return full !== null && spawnSync('git', ['-C', dirname(full), 'check-ignore', '-q', basename(full)]).status === 0
+      return full !== null && !isHardLinked(full) && spawnSync('git', ['-C', dirname(full), 'check-ignore', '-q', basename(full)]).status === 0
     },
     readFile: (path) => {
       try {
@@ -37,6 +37,17 @@ export function gitEnv(cwd: string): GuardEnv {
       // hook's time budget, so it stays blocked as unscanned.
       return files && files.length <= MAX_FORCED_FILES ? files.map(file => join(dir, file)) : null
     },
+  }
+}
+
+// A hard link shares its bytes with every other name for the file, a tracked
+// one included, and nothing on the ignored name says which.
+function isHardLinked(full: string): boolean {
+  try {
+    return statSync(full).nlink > 1
+  }
+  catch {
+    return false
   }
 }
 

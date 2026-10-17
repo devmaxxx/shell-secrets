@@ -174,7 +174,7 @@ Scans a shell command line and returns a `CommandScan`:
 interface CommandScan {
   findings: CommandFinding[] // Finding plus `variable` when the secret is assigned (NAME=secret)
   redirectTargets: string[] // files written through >, >> or tee, unexpanded
-  messageFiles: string[] // files git or gh publish verbatim (commit -F, --body-file, a stdin source, add -f)
+  messageFiles: string[] // files git or gh publish verbatim (commit -F, --body-file, a stdin source, add -f, gh uploads)
   unresolvedSources: string[] // what it publishes that no file name pins down; treat as unscanned
 }
 ```
@@ -187,7 +187,7 @@ findSecretsInCommand(`export GITHUB_TOKEN=${token} && git commit -F msg.txt > ou
 //   unresolvedSources: [] }
 ```
 
-The scanner cannot read `messageFiles`; pass their contents to `findSecrets` yourself. A file the command first writes from literal text (`echo`, `printf`, a heredoc that does not expand, a `tee` fed by one) is left out, since that text is already in the command; one that any other command names first, such as `cp .env msg`, is unresolved, since what is on disk now is not what gets published. `git add -f -A` lists `.`, and a forced add can name a directory: give `checkToolCall` a `listIgnored` in its `GuardEnv` to scan the ignored files under it, which the hook does through `git ls-files` up to 2000 files. `unresolvedSources` holds what it cannot pin to a file: `git add --pathspec-from-file`, a `--body-file -` fed by a stage other than `cat`, `head` or `tail`, a relative path after `cd` or under `git -C`, and a file the command fills any other way.
+The scanner cannot read `messageFiles`; pass their contents to `findSecrets` yourself. A file the command first writes from literal text (`echo`, `printf`, a heredoc that does not expand, a `tee` fed by one) is left out, since that text is already in the command; one that any other command names first, such as `cp .env msg`, is unresolved, since what is on disk now is not what gets published. `git add -f -A` lists `.`, and a forced add can name a directory: give `checkToolCall` a `listIgnored` in its `GuardEnv` to scan the ignored files under it, which the hook does through `git ls-files` up to 2000 files. `gh gist create`, `gh release create` / `upload` assets, `gh api --input` and `gh api -F key=@file` are read as published files too. The command is found by name however it is quoted or wrapped (`'git'`, `\git`, `nice`, `timeout`), and shell code run through `bash -c`, `eval` or a heredoc fed to a shell is read the same way. `unresolvedSources` holds what it cannot pin to a file: `git add --pathspec-from-file`, a `--body-file -` fed by a stage other than `cat`, `head` or `tail`, a relative path after `cd` or under `git -C`, a file the command fills any other way, arguments built by `xargs`, a message built by a command or process substitution (`-m "$(cat .env)"`, `-F <(…)`) other than a literal `$(cat <<'EOF' … EOF)` or `$(echo …)`, and a command over 100,000 characters.
 
 ### `onlyWritesTo(cmd, accept)`
 
@@ -251,9 +251,9 @@ npx shell-secrets install claude --project   # .claude/settings.json, runs the r
 npx shell-secrets uninstall claude
 ```
 
-Installing again replaces the earlier entry and leaves other hooks alone. A project install runs `npx --no-install shell-secrets hook`, so add the package as a devDependency there.
+Installing again replaces the earlier entry and leaves other hooks alone. A project install runs `npx --no-install shell-secrets hook || exit 2`, so add the package as a devDependency there; without it the hook blocks every call rather than letting them run unchecked.
 
-A secret is let through when it only lands in a file git ignores and does not track, such as `.env`: `echo "TOKEN=..." >> .env` passes, `... >> .env; cp .env config.js` does not, and neither does a write to an ignored name that links to a tracked file. The files `git commit -F` and `gh --body-file` publish are scanned too, including one fed to `-F -` through `<` or `cat file |`, and so is a file `git add -f` forces past `.gitignore`; one the hook cannot read blocks the call, and so does one it cannot pin down, such as a message file filled by `cat .env >`. A forced add of a directory scans the ignored files in it. So does a tool call the hook cannot parse.
+A secret is let through when it only lands in a file git ignores and does not track, such as `.env`: `echo "TOKEN=..." >> .env` passes, `... >> .env; cp .env config.js` does not, and neither does a write to an ignored name that is a symbolic or hard link. The files `git commit -F` and `gh --body-file` publish are scanned too, including one fed to `-F -` through `<` or `cat file |`, and so is a file `git add -f` forces past `.gitignore`; one the hook cannot read blocks the call, and so does one it cannot pin down, such as a message file filled by `cat .env >`. A forced add of a directory scans the ignored files in it. So does a tool call the hook cannot parse.
 
 For a hook of your own, `checkToolCall` holds the same policy:
 
@@ -327,6 +327,8 @@ The string scanners above cover far more providers than shell-secrets: @sanity-l
 - 38 rules, not hundreds. Add your own for the services you use.
 - No git history scanning; the CLI only installs and runs the agent hook.
 - Shell parsing is best effort. A command it cannot read is not treated as a plain write, which is the stricter answer.
+- Plain `git add` and `git commit -a` are not scanned: they stage files git already tracks or does not ignore, which a write to them was checked against when it was made. Scan the staged diff with the [pre-commit recipe](#pre-commit-check-on-the-staged-diff) to cover them.
+- A script run from a file or a pipe (`bash deploy.sh`, `curl … | bash`, `python publish.py`) runs code the command line does not show, and a variable set outside the command (`-m "$TOKEN"` with `TOKEN` from the agent's environment) expands to a value the hook never sees; neither is followed.
 
 ## Contributing
 

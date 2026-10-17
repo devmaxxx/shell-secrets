@@ -46,8 +46,9 @@ export const fallbackRules: readonly Rule[] = [
     name: 'secret-looking value',
     env: null,
     // `NAME=value`, `name: "value"`, `name => value` and `--name value`. The
-    // value is judged by isGenericNonSecret, so the name list can stay wide.
-    pattern: new RegExp(`${SECRET_NAME}[\\w.-]{0,40}["']?\\]?(?:\\s{0,10}(?::=|[:=]|=>|<-)|(?<=--[\\w-]{1,80})(?=\\s))\\s{0,10}[\\t "'\`]?([\\w+./~^-][\\w+./=~^!@#%*-]{14,89})(?=[\\s"'\`,;)}]|</|$)`, 'gi'),
+    // value is judged by isGenericNonSecret, so the name list can stay wide;
+    // the value takes the punctuation password generators emit.
+    pattern: new RegExp(`${SECRET_NAME}[\\w.-]{0,40}["']?\\]?(?:\\s{0,10}(?::=|[:=]|=>|<-)|(?<=--[\\w-]{1,80})(?=\\s))\\s{0,10}[\\t "'\`]?([\\w+./~^-][\\w+./=~^!@#%*&?$|:-]{14,89})(?=[\\s"'\`,;)}]|</|$)`, 'gi'),
     secretGroup: 1,
     ignore: match => isNotASecretName(match) || isGenericNonSecret(match[1] ?? '', keyOf(match)),
     fallback: true,

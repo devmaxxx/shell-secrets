@@ -6,9 +6,9 @@ import { gitEnv } from './git-env'
 // Claude Code and Codex share the hook protocol; they differ in tool names and
 // in Codex's apply_patch, which carries a whole patch instead of one file.
 function toToolCall(tool: unknown, input: Record<string, unknown>): ToolCall | null {
-  const text = (key: string): string => typeof input[key] === 'string' ? input[key] : ''
+  const text = (key: string, from = input): string => stringField(from, key)
   const edits = Array.isArray(input.edits) ? input.edits.map(record) : []
-  const joined = (key: string): string => edits.map(edit => typeof edit[key] === 'string' ? edit[key] : '').join('\n')
+  const joined = (key: string): string => edits.map(edit => text(key, edit)).join('\n')
   switch (tool) {
     case 'Bash':
       return { kind: 'shell', command: text('command') }
@@ -27,16 +27,27 @@ function toToolCall(tool: unknown, input: Record<string, unknown>): ToolCall | n
   }
 }
 
+// An absent field is empty, but one of another shape (a `command` sent as an
+// array) would scan as empty and let through whatever the tool makes of it.
+function stringField(input: Record<string, unknown>, key: string): string {
+  const value = input[key]
+  if (value === undefined || value === null)
+    return ''
+  if (typeof value !== 'string')
+    throw new TypeError(`${key} is not a string`)
+  return value
+}
+
 function record(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null ? value as Record<string, unknown> : {}
 }
 
 // Any exit other than 2 lets the call run, so a payload the hook cannot read
 // blocks instead of passing unchecked.
-export function runHook(stdin: string): number {
+export function runHook(stdin: () => string): number {
   let findings
   try {
-    const payload = record(JSON.parse(stdin))
+    const payload = record(JSON.parse(stdin()))
     const call = toToolCall(payload.tool_name, record(payload.tool_input))
     if (!call)
       return 0
