@@ -62,8 +62,8 @@ describe('checkToolCall', () => {
   })
 
   it('blocks a message file it cannot read, unless the command writes it first', () => {
-    expect(ids({ kind: 'shell', command: 'cd notes && gh issue create --body-file body.md' }, env())).toEqual(['unreadable-message-file'])
-    expect(ids({ kind: 'shell', command: 'gh issue create --body-file "$DIR/body.md"' }, env())).toEqual(['unreadable-message-file'])
+    expect(ids({ kind: 'shell', command: 'cd notes && gh issue create --body-file body.md' }, env())).toEqual(['unscanned-published-file'])
+    expect(ids({ kind: 'shell', command: 'gh issue create --body-file "$DIR/body.md"' }, env())).toEqual(['unscanned-published-file'])
     expect(ids({ kind: 'shell', command: 'echo fix > msg.txt && git commit -F msg.txt' }, env())).toEqual([])
   })
 
@@ -73,6 +73,69 @@ describe('checkToolCall', () => {
     expect(ids({ kind: 'patch', patch: crlf }, env())).toEqual(['github-token'])
     const unknown = ['*** Add File: .env', '*** Copy File: config.js', `+${token}`].join('\n')
     expect(ids({ kind: 'patch', patch: unknown }, env())).toEqual(['github-token'])
+  })
+
+  it('scans a file git add -f forces past .gitignore', () => {
+    const files = { '.env': `T=${fake.github()}\n`, 'notes.md': 'clean' }
+    expect(ids({ kind: 'shell', command: 'git add -f .env && git commit -m wip' }, env(files))).toEqual(['github-token'])
+    expect(ids({ kind: 'shell', command: 'git add --force -- notes.md' }, env(files))).toEqual([])
+    expect(ids({ kind: 'shell', command: 'git add .env' }, env(files))).toEqual([])
+  })
+
+  it('scans the file a message is piped or redirected from', () => {
+    const files = { 'notes.md': `see ${fake.github()}` }
+    expect(ids({ kind: 'shell', command: 'cat notes.md | gh issue create --title t --body-file -' }, env(files))).toEqual(['github-token'])
+    expect(ids({ kind: 'shell', command: 'git commit -F - < notes.md' }, env(files))).toEqual(['github-token'])
+    expect(ids({ kind: 'shell', command: `git commit -F - <<'EOF'\nfix\nEOF` }, env(files))).toEqual([])
+    expect(ids({ kind: 'shell', command: 'echo fix | git commit -F -' }, env(files))).toEqual([])
+  })
+
+  it('blocks what it publishes but cannot pin to a file', () => {
+    const files = { '.env': `T=${fake.github()}\n`, 'notes.md': 'clean', 'list.txt': '.env' }
+    for (const command of [
+      'git add -f --pathspec-from-file=list.txt',
+      'cd sub && git add -f .env',
+      'git -C sub add -f .env',
+      'cat notes.md | tee t | gh pr create -F -',
+      'sed s/a/b/ notes.md | gh pr create --body-file -',
+      'cat .env > body.md && gh pr create -F body.md',
+      'echo "$(cat .env)" > body.md && gh pr create --body-file body.md',
+      'cat > msg.txt <<EOF\n$T\nEOF\ngit commit -F msg.txt',
+      'echo "$(cat .env)" | gh pr create -F -',
+      'printf "$(cat .env)" | gh pr create -F -',
+      'gh pr create -F - <<EOF\n$(cat .env)\nEOF',
+      'gh pr create --body-file - <<< "$(cat .env)"',
+      'echo ok > /tmp/m && cp .env /tmp/m && git commit -F /tmp/m',
+      'cp .env notes.md && gh pr create --body-file notes.md',
+      'cp .env ./notes.md && gh pr create --body-file notes.md',
+    ])
+      expect(ids({ kind: 'shell', command }, env(files)), command).toEqual(['unscanned-published-file'])
+  })
+
+  it('reads every file a pipe or redirect feeds a message from', () => {
+    const files = { 'notes.md': `see ${fake.github()}` }
+    for (const command of [
+      'cat < notes.md | gh pr create --body-file -',
+      'cat notes.md |& gh pr create -F -',
+      'cat notes.md | (gh pr create -F -)',
+      'tail -n +2 notes.md | gh pr create -F -',
+      'head -c 1k notes.md | git commit -F -',
+    ])
+      expect(ids({ kind: 'shell', command }, env(files)), command).toEqual(['github-token'])
+    expect(ids({ kind: 'shell', command: 'tail -n +2 notes.md | gh pr create -F -' }, env({ 'notes.md': 'clean' }))).toEqual([])
+  })
+
+  it('trusts a message file the command writes from literal text', () => {
+    for (const command of [
+      'echo fix > msg.txt && git commit -F msg.txt',
+      `cat > msg.txt <<'EOF'\nfix: $not expanded\nEOF\ngit commit -F msg.txt`,
+      'cat > msg.txt <<EOF\nfix\nEOF\ngit commit -F msg.txt',
+      `cat <<'EOF' | gh pr create -F -\nfix: $not expanded\nEOF`,
+      'printf "feat: x\\n" | tee /tmp/msg >/dev/null && git commit -F /tmp/msg',
+      `gh pr create -F - <<'EOF'\n$(not run)\nEOF`,
+    ])
+      expect(ids({ kind: 'shell', command }, env()), command).toEqual([])
+    expect(ids({ kind: 'shell', command: 'cat msg.txt && git commit -F msg.txt' }, env({ 'msg.txt': 'fix' }))).toEqual([])
   })
 
   it('follows a patch that moves an ignored file into a tracked one', () => {
@@ -145,6 +208,23 @@ describe('cli', () => {
     vi.spyOn(process, 'cwd').mockReturnValue(home)
     run(['install', 'codex', '--project'], '', home)
     expect(JSON.parse(readFileSync(join(home, '.codex/hooks.json'), 'utf8')).hooks.PreToolUse[0].hooks[0].command).toBe('npx --no-install shell-secrets hook')
+  })
+
+  it('scans the ignored files a forced add of a directory or the whole tree stages', () => {
+    const repo = mkdtempSync(join(tmpdir(), 'ss-add-'))
+    spawnSync('git', ['init', '-q', repo])
+    writeFileSync(join(repo, '.gitignore'), '.env\ndist/\n')
+    mkdirSync(join(repo, 'dist'))
+    writeFileSync(join(repo, 'dist/app.js'), 'clean')
+    const add = (command: string): number => run(['hook'], JSON.stringify({ tool_name: 'Bash', tool_input: { command }, cwd: repo }))
+    expect(add('git add -f dist/')).toBe(0)
+    expect(add('git add -Af && git commit -m x')).toBe(0)
+    writeFileSync(join(repo, '.env'), `T=${fake.github()}\n`)
+    expect(add('git add -f -A')).toBe(2)
+    expect(add('git add -f dist/')).toBe(0)
+    writeFileSync(join(repo, 'dist/config.js'), `const t = '${fake.github()}'`)
+    expect(add('git add -f dist')).toBe(2)
+    expect(add('git add -u -f')).toBe(0)
   })
 
   it('passes a clean call and an unknown tool', () => {

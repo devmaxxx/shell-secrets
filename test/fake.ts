@@ -2,6 +2,8 @@
 // bodies, so this repo holds nothing secret-shaped for push protection to flag.
 // The generator is seeded: a truly random body now and then spells "fake" or
 // "xxxx" and is rightly read as a placeholder, which would make the suite flaky.
+import { withGitHubChecksum } from '../src/random'
+
 export const ALNUM = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
 const UPPER_NUM = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'
 const HEX = '0123456789abcdef'
@@ -22,9 +24,9 @@ export function rand(length: number, alphabet = ALNUM): string {
 export const p = (...parts: string[]): string => parts.join('')
 
 export const fake = {
-  github: () => p('gh', 'p_', rand(36)),
-  githubOauth: () => p('gh', 'o_', rand(36)),
-  githubServer: () => p('gh', 's_', rand(36)),
+  github: () => withGitHubChecksum(p('gh', 'p_'), rand(30)),
+  githubOauth: () => withGitHubChecksum(p('gh', 'o_'), rand(30)),
+  githubServer: () => withGitHubChecksum(p('gh', 's_'), rand(30)),
   githubPat: () => p('github', '_pat_', rand(22), '_', rand(59)),
   atlassian: () => p('ATA', 'TT3', rand(180)),
   atlassianAccess: () => p('ATC', 'TT3', rand(180)),
@@ -70,6 +72,15 @@ export const fake = {
   jdbc: () => p('jdbc:postgres', 'ql://db.prod.internal:5432/app?user=app&password=', rand(18)),
   telegram: () => p(rand(10, '123456789'), ':', 'AA', rand(33)),
   jwt: () => p('ey', 'J', rand(40), '.ey', 'J', rand(120), '.', rand(43)),
+  sentry: () => p('sntr', 'ys_', 'eyJ', rand(120)),
+  sentryUser: () => p('sntr', 'yu_', rand(64, HEX)),
+  databricks: () => p('da', 'pi', rand(32, HEX)),
+  onepassword: () => p('op', 's_', btoa(JSON.stringify({ signInAddress: 'my.1password.com', email: `${rand(26).toLowerCase()}@1passwordserviceaccounts.com`, secretKey: rand(34), srpX: rand(64, HEX) }))),
+  urlPassword: () => p('https://deploy:', rand(20), '@registry.internal.io/v2'),
+  authorizationHeader: () => p('-H "Author', 'ization: Bearer ', rand(40), '"'),
+  curlUser: () => p('curl -u deploy:', rand(20), ' https://api.internal.io'),
+  genericAssignment: () => p('API_', 'TOKEN=', rand(32)),
+  genericOption: () => p('deploy --api', '-key ', rand(32)),
 }
 
 /** The rule each fake must be reported under. */
@@ -121,4 +132,13 @@ export const RULE_OF: Record<keyof typeof fake, string> = {
   jdbc: 'database-uri-query-password',
   telegram: 'telegram-bot-token',
   jwt: 'jwt',
+  sentry: 'sentry-token',
+  sentryUser: 'sentry-token',
+  databricks: 'databricks-token',
+  onepassword: 'onepassword-service-account-token',
+  urlPassword: 'url-password',
+  authorizationHeader: 'authorization-header',
+  curlUser: 'curl-user-password',
+  genericAssignment: 'generic-secret',
+  genericOption: 'generic-secret',
 }

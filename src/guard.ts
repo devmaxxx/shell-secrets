@@ -15,6 +15,12 @@ export interface GuardEnv {
   isIgnored: (path: string) => boolean
   /** The file's contents, or `null` when it cannot be read or does not exist. */
   readFile: (path: string) => string | null
+  /**
+   * The untracked, ignored files under a directory, which `git add -f dir`
+   * would stage, or `null` when `path` is no directory or they cannot be
+   * listed. Without it, a forced add of a directory blocks the call.
+   */
+  listIgnored?: (path: string) => string[] | null
 }
 
 /**
@@ -39,20 +45,23 @@ function checkShell(command: string, env: GuardEnv, options: ScanOptions): Findi
   if (scan.findings.length > 0 && onlyWritesTo(command, env.isIgnored))
     return []
   // git and gh publish these files verbatim, so their contents are part of the
-  // call. One that cannot be read blocks the call unless the command writes it
-  // first: a `cd` earlier in the command, or a `$` in the path, would otherwise
-  // let an unscanned file through as "no file".
-  const published = scan.messageFiles.flatMap((file) => {
+  // call. One that cannot be read, or a source no file name pins down, blocks
+  // the call: letting it through would read an unscanned file as "no file".
+  const scanFile = (file: string): Finding[] => {
     const text = env.readFile(file)
-    if (text !== null)
-      return findSecrets(text, options)
-    return scan.redirectTargets.includes(file) ? [] : [unreadable(file)]
+    return text === null ? [unscanned(file)] : findSecrets(text, options)
+  }
+  const published = scan.messageFiles.flatMap((file) => {
+    if (env.readFile(file) !== null)
+      return scanFile(file)
+    const inside = env.listIgnored?.(file)
+    return inside ? inside.flatMap(scanFile) : [unscanned(file)]
   })
-  return [...scan.findings, ...published]
+  return [...scan.findings, ...published, ...scan.unresolvedSources.map(unscanned)]
 }
 
-function unreadable(file: string): Finding {
-  return { ruleId: 'unreadable-message-file', name: 'unscanned message file', env: null, start: 0, end: 0, preview: file }
+function unscanned(source: string): Finding {
+  return { ruleId: 'unscanned-published-file', name: 'published file it could not scan', env: null, start: 0, end: 0, preview: source }
 }
 
 const PATCH_FILE = /^\*\*\* (?:Add File|Update File|Move to): (.+)$/

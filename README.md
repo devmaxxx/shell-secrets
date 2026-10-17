@@ -54,8 +54,10 @@ Coding agents and CI bots run shell commands, and that is where secrets leak now
 
 - **Reads shell commands.** `findSecretsInCommand` reports secrets assigned or exported (`NAME=secret`), the files a command writes through `>`, `>>` or `tee`, and the message files `git` / `gh` would publish.
 - **Built for agent tool calls.** `onlyWritesTo` answers "does this command only write the secret into an allowed file, such as a gitignored `.env`?".
-- **Zero runtime dependencies.** ESM, fully typed, about 7 kB gzipped.
-- **Tuned for precision.** Placeholders (`ghp_xxxx…`, `<token>`, `example`), variable references (`${DB_PASSWORD}`) and local dev credentials (`postgres:postgres@localhost`) are not reported, so a hit is worth stopping for.
+- **Zero runtime dependencies.** ESM, fully typed, about 12 kB gzipped.
+- **Tuned for precision.** Placeholders (`ghp_xxxx…`, `<token>`, `example`), variable references (`${DB_PASSWORD}`) and local dev credentials (`postgres:postgres@localhost`) are not reported, so a hit is worth stopping for. Classic GitHub tokens must carry a valid CRC32 checksum, so made-up ones in docs and tests pass.
+- **Sees through base64.** A blob that decodes to text, such as a Kubernetes Secret value or an `echo … | base64 -d`, is decoded and scanned, nested encodings included; the finding spans the encoded text.
+- **Catches unnamed secrets too.** A value under a secret-sounding name (`API_TOKEN=…`, `client_secret: "…"`, `--api-key …`) is reported when a statistical test reads it as machine-generated, not a word, identifier, path or UUID.
 - **Safe to log.** A finding holds the rule, the offsets and a redacted preview such as `ghp_********`. It never holds the value.
 - **Diff-aware.** `findNewSecrets` reports only what an edit adds, not secrets the text already had.
 - **Extensible.** Add your own rules or drop built-in ones with a plain array.
@@ -125,6 +127,15 @@ findSecrets('postgres://app:$PG_PASSWORD@db.prod.internal/app') // [] (variable 
 | `database-uri-query-password` | libpq / JDBC URI | `jdbc:postgresql://host/db?password=<password>` | `DATABASE_URL` |
 | `telegram-bot-token` | Telegram bot, also inside a Bot API URL | `123456789:••••` | `TELEGRAM_BOT_TOKEN` |
 | `jwt` | JSON Web Token of 150+ characters | `eyJ••••.eyJ••••.••••` | — |
+| `sentry-token` | Sentry organization or user auth token | `sntrys_eyJ••••`, `sntryu_••••` | `SENTRY_AUTH_TOKEN` |
+| `databricks-token` | Databricks personal access token | `dapi••••` (32 hex) | `DATABRICKS_TOKEN` |
+| `onepassword-service-account-token` | 1Password service account, body checked to be base64 JSON | `ops_eyJ••••` | `OP_SERVICE_ACCOUNT_TOKEN` |
+| `url-password` | Password in any other URL, to a host that resolves | `https://user:<password>@host.tld` | — |
+| `authorization-header` | Bearer, Basic or token credential in an `Authorization` header | `Authorization: Bearer ••••` | — |
+| `curl-user-password` | Password passed to `curl -u` | `curl -u user:<password>` | — |
+| `generic-secret` | Random-looking value under a secret-sounding name | `API_TOKEN=••••`, `--api-key ••••` | — |
+
+The last four are fallbacks: where one overlaps a provider rule's finding, only the provider's is reported. `generic-secret` judges the value with the randomness test from [ripsecrets](https://github.com/sirwart/ripsecrets) (distinct characters, character-class balance and common bigrams) and drops runs of the alphabet, UUIDs, member paths such as `process.env.TOKEN`, file paths and names that hold a hash or public key.
 
 For URIs, AWS secret keys and Telegram tokens the finding spans only the secret part, not the user, host or variable name.
 
@@ -163,7 +174,8 @@ Scans a shell command line and returns a `CommandScan`:
 interface CommandScan {
   findings: CommandFinding[] // Finding plus `variable` when the secret is assigned (NAME=secret)
   redirectTargets: string[] // files written through >, >> or tee, unexpanded
-  messageFiles: string[] // files git or gh publish verbatim (commit -F, --body-file)
+  messageFiles: string[] // files git or gh publish verbatim (commit -F, --body-file, a stdin source, add -f)
+  unresolvedSources: string[] // what it publishes that no file name pins down; treat as unscanned
 }
 ```
 
@@ -171,10 +183,11 @@ interface CommandScan {
 findSecretsInCommand(`export GITHUB_TOKEN=${token} && git commit -F msg.txt > out.log`)
 // { findings: [{ ruleId: 'github-token', variable: 'GITHUB_TOKEN', preview: 'ghp_********', … }],
 //   redirectTargets: ['out.log'],
-//   messageFiles: ['msg.txt'] }
+//   messageFiles: ['msg.txt'],
+//   unresolvedSources: [] }
 ```
 
-The scanner cannot read `messageFiles`; pass their contents to `findSecrets` yourself.
+The scanner cannot read `messageFiles`; pass their contents to `findSecrets` yourself. A file the command first writes from literal text (`echo`, `printf`, a heredoc that does not expand, a `tee` fed by one) is left out, since that text is already in the command; one that any other command names first, such as `cp .env msg`, is unresolved, since what is on disk now is not what gets published. `git add -f -A` lists `.`, and a forced add can name a directory: give `checkToolCall` a `listIgnored` in its `GuardEnv` to scan the ignored files under it, which the hook does through `git ls-files` up to 2000 files. `unresolvedSources` holds what it cannot pin to a file: `git add --pathspec-from-file`, a `--body-file -` fed by a stage other than `cat`, `head` or `tail`, a relative path after `cd` or under `git -C`, and a file the command fills any other way.
 
 ### `onlyWritesTo(cmd, accept)`
 
@@ -222,6 +235,7 @@ A rule may also set:
 
 - `ignore(match)` to drop a match outright;
 - `placeholders: false` to skip the shared placeholder test;
+- `fallback: true` to report a match only where no specific rule already did;
 - `prepare(text)` to rewrite the text before matching. It must return a string of the same length, or `findSecrets` throws, because offsets would no longer point at the original text.
 
 ## Recipes
@@ -239,7 +253,7 @@ npx shell-secrets uninstall claude
 
 Installing again replaces the earlier entry and leaves other hooks alone. A project install runs `npx --no-install shell-secrets hook`, so add the package as a devDependency there.
 
-A secret is let through when it only lands in a file git ignores and does not track, such as `.env`: `echo "TOKEN=..." >> .env` passes, `... >> .env; cp .env config.js` does not, and neither does a write to an ignored name that links to a tracked file. The files `git commit -F` and `gh --body-file` publish are scanned too; one the hook cannot read blocks the call. So does a tool call the hook cannot parse.
+A secret is let through when it only lands in a file git ignores and does not track, such as `.env`: `echo "TOKEN=..." >> .env` passes, `... >> .env; cp .env config.js` does not, and neither does a write to an ignored name that links to a tracked file. The files `git commit -F` and `gh --body-file` publish are scanned too, including one fed to `-F -` through `<` or `cat file |`, and so is a file `git add -f` forces past `.gitignore`; one the hook cannot read blocks the call, and so does one it cannot pin down, such as a message file filled by `cat .env >`. A forced add of a directory scans the ignored files in it. So does a tool call the hook cannot parse.
 
 For a hook of your own, `checkToolCall` holds the same policy:
 
@@ -300,18 +314,18 @@ export function scrub(line: string): string {
 | --- | --- | --- | --- | --- | --- |
 | Runtime | Node.js library | JS library, Node and browser | Rust core via wasm, Node and browser | Node.js CLI and library | Go binary |
 | Input | one string or command, in-process | one string, in-process | one string, in-process | files; `@secretlint/core` API takes content | files, git history, stdin |
-| Rules | 31 curated | 1,100+, from TruffleHog detectors | built-in detectors plus declarative rulesets | presets for many providers | large built-in set, with entropy thresholds |
+| Rules | 38 curated, plus a generic rule | 1,100+, from TruffleHog detectors | built-in detectors plus declarative rulesets | presets for many providers | large built-in set, with entropy thresholds |
 | Redaction | masked preview in each finding | `redact()` | `scanAndRedact()` | no | no |
 | Runtime dependencies | 0 | 0 | 1 (its wasm build) | several | — |
 | Shell-command analysis | yes | no | no | no | no |
 
-The string scanners above cover far more providers than shell-secrets: @sanity-labs/secret-scan ships over 1,100 rules against its 31. Use one of them, or gitleaks or secretlint for a repository and its history, when coverage is what you need. Use shell-secrets when the input is a shell command or an agent's tool call and you need to know what the command does with the secret — exports it, writes it to a file, or puts it in a commit message — and where a false positive costs a blocked action.
+The string scanners above cover far more providers than shell-secrets: @sanity-labs/secret-scan ships over 1,100 rules against its 38. Use one of them, or gitleaks or secretlint for a repository and its history, when coverage is what you need. Use shell-secrets when the input is a shell command or an agent's tool call and you need to know what the command does with the secret — exports it, writes it to a file, or puts it in a commit message — and where a false positive costs a blocked action.
 
 ## Limits
 
-- Pattern-based: a secret with no recognisable shape (a generic `password = …`, a random hex string) is not found. There is no entropy scan.
-- 31 rules, not hundreds. Add your own for the services you use.
-- No CLI and no git history scanning.
+- A secret with no recognisable shape is found only under a secret-sounding name, and only when it looks random: a human-chosen `password = "summer2024"` is not reported.
+- 38 rules, not hundreds. Add your own for the services you use.
+- No git history scanning; the CLI only installs and runs the agent hook.
 - Shell parsing is best effort. A command it cannot read is not treated as a plain write, which is the stricter answer.
 
 ## Contributing

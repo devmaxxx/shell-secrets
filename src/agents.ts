@@ -1,6 +1,6 @@
 import type { GuardEnv, ToolCall } from './guard'
 import { spawnSync } from 'node:child_process'
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import process from 'node:process'
@@ -138,6 +138,8 @@ function runHook(stdin: string): number {
   return 2
 }
 
+const MAX_FORCED_FILES = 2000
+
 function gitEnv(cwd: string): GuardEnv {
   return {
     // check-ignore answers no for a tracked file and for a path outside any
@@ -149,13 +151,32 @@ function gitEnv(cwd: string): GuardEnv {
     },
     readFile: (path) => {
       try {
-        return readFileSync(resolve(cwd, path.replace(/^(?:~|\$HOME|\$\{HOME\})(?=\/)/, homedir())), 'utf8')
+        return readFileSync(expand(cwd, path), 'utf8')
       }
       catch {
         return null
       }
     },
+    listIgnored: (path) => {
+      const dir = expand(cwd, path)
+      try {
+        if (!statSync(dir).isDirectory())
+          return null
+      }
+      catch {
+        return null
+      }
+      const listed = spawnSync('git', ['-C', dir, 'ls-files', '-z', '--others', '--ignored', '--exclude-standard'], { encoding: 'utf8', maxBuffer: 16 << 20 })
+      const files = listed.status === 0 ? listed.stdout.split('\0').filter(Boolean) : null
+      // A forced add of a dependency or build tree is too big to scan inside a
+      // hook's time budget, so it stays blocked as unscanned.
+      return files && files.length <= MAX_FORCED_FILES ? files.map(file => join(dir, file)) : null
+    },
   }
+}
+
+function expand(cwd: string, path: string): string {
+  return resolve(cwd, path.replace(/^(?:~|\$HOME|\$\{HOME\})(?=\/)/, homedir()))
 }
 
 // The real path a write to `full` lands in, or `null` for a link whose target

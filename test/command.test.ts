@@ -102,7 +102,7 @@ describe('messageFiles: files git or gh publish verbatim', () => {
     'gh pr create --title x --body-file=body.md': 'body.md',
     'gh pr create --title x -F body.md': 'body.md',
     'gh issue comment 4 --body-file ./body.md': './body.md',
-    'git -C sub commit -F body.md': 'body.md',
+    'git -C /repo commit -F /tmp/body.md': '/tmp/body.md',
   }
   for (const [command, file] of Object.entries(COMMANDS)) {
     it(`names the file in \`${command}\``, () => {

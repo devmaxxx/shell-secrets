@@ -78,9 +78,78 @@ export function findSecrets(text: string, options: ScanOptions = {}): Finding[] 
     return []
   }
   const rules = options.rules ?? defaultRules
-  return rules
-    .flatMap(rule => scanRule(rule, text))
-    .sort((a, b) => a.start - b.start)
+  const found = rules.filter(rule => !rule.fallback).flatMap(rule => scanRule(rule, text))
+  const keep = (fresh: Finding[]): void => {
+    const overlaps = overlapIndex(found)
+    // One push per finding: spreading a six-figure array overflows the stack.
+    for (const f of fresh) {
+      if (!overlaps(f))
+        found.push(f)
+    }
+  }
+  keep(findEncoded(text, rules))
+  for (const rule of rules.filter(rule => rule.fallback))
+    keep(scanRule(rule, text))
+  return found.sort((a, b) => a.start - b.start)
+}
+
+// Kept findings sorted by start, with the furthest end reached so far: a
+// finding overlaps one of them when the last kept finding to start before its
+// end reaches past its start. Linear checks against every kept finding go
+// quadratic on a file with a finding on each of 200k lines.
+function overlapIndex(kept: readonly Finding[]): (f: Finding) => boolean {
+  const sorted = [...kept].sort((a, b) => a.start - b.start)
+  const reach: number[] = []
+  for (const [i, f] of sorted.entries())
+    reach.push(Math.max(f.end, reach[i - 1] ?? 0))
+  return (f) => {
+    let lo = 0
+    let hi = sorted.length
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1
+      if (sorted[mid]!.start < f.end)
+        lo = mid + 1
+      else
+        hi = mid
+    }
+    return lo > 0 && reach[lo - 1]! > f.start
+  }
+}
+
+const BASE64_BLOB = /(?<![\w+/=-])[\w+/-]{32,}={0,2}(?![\w+/=-])/g
+const PRINTABLE = /^[\t\n\r\x20-\x7E]*$/
+
+function decodeBase64(blob: string): string | null {
+  try {
+    const decoded = atob(blob.replace(/-/g, '+').replace(/_/g, '/').replace(/=+$/, ''))
+    return PRINTABLE.test(decoded) ? decoded : null
+  }
+  catch {
+    return null
+  }
+}
+
+// A Kubernetes Secret, a `base64 -d` pipeline or a Basic credential carries the
+// secret encoded. A blob that decodes to binary (a key body, a hash) is passed
+// over; one that decodes to text is scanned like any text, nested encodings
+// included, and each level is three quarters the size of the one above. The
+// finding spans the encoded text.
+function findEncoded(text: string, rules: readonly Rule[]): Finding[] {
+  const found: Finding[] = []
+  for (const match of text.matchAll(BASE64_BLOB)) {
+    const decoded = decodeBase64(match[0])
+    const inner = decoded === null ? undefined : findSecrets(decoded, { rules })[0]
+    if (!decoded || !inner)
+      continue
+    found.push({
+      ...inner,
+      name: `${inner.name}, base64-encoded`,
+      start: match.index,
+      end: match.index + match[0].length,
+      preview: redact(decoded.slice(inner.start, inner.end)),
+    })
+  }
+  return found
 }
 
 /**

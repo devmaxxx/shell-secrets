@@ -186,6 +186,117 @@ describe('a long value is judged by its start, and in linear time', () => {
   })
 })
 
+describe('telling a real token from a made-up one', () => {
+  it('ignores a classic GitHub token whose checksum does not add up, as in docs and tests', () => {
+    const real = fake.github()
+    expect(ids(real)).toEqual(['github-token'])
+    expect(ids(p(real.slice(0, -6), rand(6)))).toEqual([])
+  })
+
+  it('ignores a 1Password token whose body is not base64 JSON', () => {
+    expect(ids(p('op', 's_', 'eyJ', rand(120)))).toEqual([])
+  })
+
+  it('reports a token once, under its provider, when a generic rule matches it too', () => {
+    expect(ids(`GITHUB_TOKEN=${fake.github()}`)).toEqual(['github-token'])
+    expect(ids(`git clone https://x-access-token:${fake.github()}@github.com/o/r`)).toEqual(['github-token'])
+    expect(ids(fake.postgresQuery())).toEqual(['database-uri-query-password'])
+  })
+})
+
+describe('a secret behind base64', () => {
+  const b64 = (text: string): string => btoa(text)
+
+  it('finds a token in a Kubernetes Secret value and spans the encoded text', () => {
+    const encoded = b64(fake.github())
+    const manifest = `kind: Secret\ndata:\n  token: ${encoded}\n`
+    const [finding] = findSecrets(manifest)
+    expect(finding).toMatchObject({ ruleId: 'github-token', name: 'GitHub token, base64-encoded', start: manifest.indexOf(encoded) })
+    expect(finding!.end - finding!.start).toBe(encoded.length)
+  })
+
+  it('finds one decoded twice, and one in a base64 -d pipeline', () => {
+    expect(ids(b64(b64(`AWS key ${fake.aws()}`)))).toEqual(['aws-access-key'])
+    expect(ids(`echo ${b64(`export T=${fake.anthropic()}`)} | base64 -d >> ~/.zshrc`)).toEqual(['anthropic-api-key'])
+  })
+
+  it('passes over a blob that decodes to binary or to clean text', () => {
+    expect(ids(`integrity: sha512-${rand(86, `${ALNUM}+/`)}==`)).toEqual([])
+    expect(ids(b64('just an ordinary sentence with nothing secret in it'))).toEqual([])
+  })
+
+  it('decodes a long run of base64 in linear time', () => {
+    const started = performance.now()
+    findSecrets('QUFB'.repeat(100_000))
+    findSecrets(b64(b64(b64('x'.repeat(100_000)))))
+    expect(performance.now() - started).toBeLessThan(2000)
+  })
+})
+
+describe('a secret-named value that is not a secret', () => {
+  const cases: Record<string, string> = {
+    'a passphrase of words': 'password = "correcthorsebatterystaple"',
+    'a function name': 'api_key: getApiKeyFromVault',
+    'a record id under a token name': '{"token_id": "3f2504e0-4f89-11d3-9a0c-0305e82c3301"}',
+    'a type name': 'credentialId: Base64URLString;',
+    'a file path': 'SECRET_KEY_FILE=./secrets/signing-key.pem',
+    'a member path': 'token: process.env.GITHUB_TOKEN',
+    'a run of the alphabet': 'token: 0123456789abcdef0123',
+    'a variable': 'deploy --token $GITHUB_TOKEN',
+    'a constant name': 'TOKEN_KIND=PERSONAL_ACCESS_TOKEN',
+    'a bearer variable': 'curl -H "Authorization: Bearer $TOKEN" https://api.io',
+    'a bearer placeholder': 'curl -H "Authorization: Bearer <your-token-here>" https://api.io',
+    'a loopback URL': 'https://user:hunter22@localhost:8080',
+    'a URL password from a variable': 'https://deploy:${REGISTRY_PASSWORD}@registry.internal.io',
+    'a curl password from variables': 'curl -u "$USER:$PASS" https://api.io',
+    'a uid:gid pair': 'docker run -u 1000:2000 node',
+    'a URL to a reserved documentation host': 'https://deploy:s3cr3tvalue@registry.example.com',
+    'a classic stand-in password': 'https://alice:hunter2@db.internal.io',
+    'a digest of a secret': `"hashed_secret": "${rand(40, '0123456789abcdef')}"`,
+    'a digest named by its suffix': `token_sha256 = "${rand(64, '0123456789abcdef')}"`,
+    'a public key': `stripe_publishable_key: ${rand(32)}`,
+    'a file named after a token': `"cloudflare_api_token.go": "${rand(64, '0123456789abcdef')}"`,
+  }
+  for (const [name, text] of Object.entries(cases)) {
+    it(`ignores ${name}`, () => {
+      expect(ids(text)).toEqual([])
+    })
+  }
+
+  it('still reports the shapes a filter could mistake for one of these', () => {
+    const value = rand(28)
+    expect(ids(`https://ci:${value}@nexus:8081/repo`)).toEqual(['url-password'])
+    expect(ids(`HEROKU_API_KEY=${rand(8, '0123456789abcdef')}-${rand(4, '0123456789abcdef')}-4${rand(3, '0123456789abcdef')}-a${rand(3, '0123456789abcdef')}-${rand(12, '0123456789abcdef')}`)).toEqual(['generic-secret'])
+    expect(ids(`db_password = "/${value}"`)).toEqual(['generic-secret'])
+    expect(ids(`hashicorp_vault_token = "${value}"`)).toEqual(['generic-secret'])
+    expect(ids(`config.token = "${value}"`)).toEqual(['generic-secret'])
+    expect(ids(`{"auth.token": "${value}"}`)).toEqual(['generic-secret'])
+    expect(ids(`db.pwd = "${value}"`)).toEqual(['generic-secret'])
+    expect(ids(`HASH_SECRET=${value}`)).toEqual(['generic-secret'])
+    expect(ids(`PUBLIC_SECRET=${value}`)).toEqual(['generic-secret'])
+    expect(ids(`API.KEY=${value}`)).toEqual(['generic-secret'])
+    expect(ids(`token.value = "${value}"`)).toEqual(['generic-secret'])
+    expect(ids(`"api.key": "${value}"`)).toEqual(['generic-secret'])
+    expect(ids(`API_KEY=${'q8Zr3LmVbN'}.Tw7xKd2pYs`)).toEqual(['generic-secret'])
+    expect(ids(`headers['Authorization'] = 'Bearer ${value}'`)).toEqual(['authorization-header'])
+    expect(ids(`curl -su deploy:${value} https://api.internal.io`)).toEqual(['curl-user-password'])
+    expect(ids(`password=${value.slice(0, 6)}!${value.slice(6, 12)}#${value.slice(12)}`)).toEqual(['generic-secret'])
+  })
+
+  it('keeps hundreds of thousands of findings without overflowing the stack', () => {
+    const line = `API_TOKEN=${rand(32)}\n`
+    expect(findSecrets(line.repeat(150_000))).toHaveLength(150_000)
+  }, 30_000)
+
+  it('scans a long run of secret names in linear time', () => {
+    const started = performance.now()
+    findSecrets('token='.repeat(30_000))
+    findSecrets(p('--token', '-'.repeat(100_000), ' x'))
+    findSecrets(p('curl ', '-u '.repeat(50_000)))
+    expect(performance.now() - started).toBeLessThan(2000)
+  })
+})
+
 describe('findNewSecrets: a secret the earlier text already holds', () => {
   const token = fake.github()
 
