@@ -1,5 +1,5 @@
 import type { Heredoc, Segment } from './parse'
-import { ARGUMENTS_FROM_STDIN, CAT_HEREDOC, CLOSING_PAREN, FIELD_FROM_FILE, GH_GRAMMARS, GH_WRITES, GIT_GRAMMARS, GIT_PLACE_OPTION, GIT_VALUED_GLOBAL, LITERAL_ECHO, REDIRECT_OPERATOR, SHELL_COMMAND_OPTION, SHELLS } from './constants'
+import { ANSI_C_STRING, ARGUMENTS_FROM_STDIN, CAT_HEREDOC, CLOSING_PAREN, FIELD_FROM_FILE, GH_GRAMMARS, GH_WRITES, GIT_GRAMMARS, GIT_PLACE_OPTION, GIT_VALUED_GLOBAL, LITERAL_ECHO, REDIRECT_OPERATOR, SHELL_COMMAND_OPTION, SHELLS } from './constants'
 import { heredocAt, skipBlanks, unquote, wordAt } from './parse'
 
 type LongOption = readonly [name: string, shortestPrefix: number, valued: boolean]
@@ -257,6 +257,12 @@ export function hasOpaqueSubstitution(cmd: string, from: number, to?: number): b
     const c = cmd[i]!
     if (c === '\\') {
       i++
+    }
+    else if (!quoted && c === '$' && cmd[i + 1] === '\'') {
+      ANSI_C_STRING.lastIndex = i
+      if (!ANSI_C_STRING.test(cmd))
+        return false
+      i = ANSI_C_STRING.lastIndex - 1
     }
     else if (!quoted && c === '\'') {
       const close = cmd.indexOf('\'', i + 1)

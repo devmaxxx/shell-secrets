@@ -7,6 +7,8 @@ const HEREDOC = /(?<!<)(<<-?\s*(["']?)(\w+)\b\2)([^\n]*)\n/
 // In `$'…'` a backslash escapes the quote; in plain `'…'` it does not.
 const ANSI_C_QUOTED = /\$'(?:[^'\\]|\\[\s\S])*'/
 
+export const ANSI_C_STRING = new RegExp(ANSI_C_QUOTED.source, 'y')
+
 const DOUBLE_QUOTED = /"(?:[^"\\]|\\[\s\S])*"/
 
 const SINGLE_QUOTED = /'[^']*'/

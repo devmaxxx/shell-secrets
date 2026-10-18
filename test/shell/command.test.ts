@@ -484,4 +484,9 @@ describe('words and commands as bash splits them', () => {
     expect(scan('git add -f .env\r').files).toEqual(['.env\r'])
     expect(scan('gh pr create -F - <\r.env').files).toEqual(['\r.env'])
   })
+
+  it('reads past an ANSI-C quoted string whose backslash escapes a quote', () => {
+    expect(scan(`git commit -m $'it\\'s' -m "$(cat .env)"`).unresolved).not.toEqual([])
+    expect(scan(`git commit -m $'it\\'s $(cat .env)'`).unresolved).toEqual([])
+  })
 })
