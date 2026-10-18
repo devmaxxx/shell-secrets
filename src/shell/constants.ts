@@ -131,6 +131,10 @@ export const ARGUMENTS_FROM_STDIN = new Set(['xargs', 'parallel'])
 
 export const SHELL_COMMAND_OPTION = /^-[A-Zabd-z]*c[A-Za-z]*$/
 
+export const SHELL_STDIN_OPTION = /^-[A-Za-rt-z]*s[A-Za-z]*$/
+
+export const SHELL_VALUED_OPTION = /^[-+][oO]$|^--(?:rcfile|init-file)$/
+
 // Programs that run a command handed to them as one string, through a shell
 // or by splitting it into words.
 export const COMMAND_RUNNERS = new Set(['env', 'su', 'runuser', 'script', 'flock', 'watch'])

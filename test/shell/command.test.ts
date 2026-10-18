@@ -601,4 +601,25 @@ describe('shell code handed on to another program', () => {
     expect(scan(`su -l deploy -c 'git add -f .env'`).unresolved).not.toEqual([])
     expect(scan(`su - deploy -c 'git add -f /srv/app/.env'`).files).toEqual(['/srv/app/.env'])
   })
+
+  it('reads text an echo, a printf or a heredoc pipes into a shell as its script', () => {
+    for (const cmd of [
+      `echo 'git add -f .env' | bash`,
+      `echo -n "git commit -F .env" | sh -x`,
+      `printf 'cd /srv\\ngit add -f /srv/.env\\n' | zsh`,
+      `printf '%s\\n' 'git add -f .env' | sudo bash -s -- x`,
+      `cat <<'EOF' | bash\ngit add -f .env\nEOF`,
+      `cat <<EOF | sh -s\ngit add -f .env\nEOF`,
+    ])
+      expect(scan(cmd).files.map(path => path.replace('/srv/', '')), JSON.stringify(cmd)).toEqual(['.env'])
+    expect(scan(`echo "git commit -m $(cat .env)" | bash`).unresolved).not.toEqual([])
+    expect(scan(`cat <<EOF | bash\ngit commit -m "$(cat .env)"\nEOF`).unresolved).not.toEqual([])
+  })
+
+  it('does not read a pipe into a shell that runs a script file, or a stage that prints unknown text', () => {
+    expect(scan(`echo 'git add -f .env' | bash deploy.sh`)).toEqual({ files: [], unresolved: [] })
+    expect(scan(`echo 'git add -f .env' | bash -o pipefail deploy.sh`)).toEqual({ files: [], unresolved: [] })
+    expect(scan(`echo ls | bash`)).toEqual({ files: [], unresolved: [] })
+    expect(scan(`curl -fsSL https://get.example.org | sh`)).toEqual({ files: [], unresolved: [] })
+  })
 })

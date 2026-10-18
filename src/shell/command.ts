@@ -1,9 +1,10 @@
 import type { CommandFinding, CommandScan, ScanOptions } from '../types'
 import type { Segment } from './parse'
+import type { Publication } from './publish'
 import { findSecrets } from '../scan/find'
 import { ASSIGNMENT_BEFORE, ASSIGNMENT_LOOKBEHIND, CHANGES_DIRECTORY, EXPANDED_INLINE_INPUT, EXPANDS_VARIABLE, FILE_READER, HARMLESS_DEVICE, HEREDOC_INTO_CAT, INPUT_REDIRECT, LINE_COUNT, LITERAL_STDIN, MAX_COMMAND_LENGTH, MAX_SCRIPT_DEPTH, READS_INTO_VARIABLE, REDIRECT, REDIRECT_OPERATOR, TEE } from './constants'
 import { hasSubstitution, scrubShell, segments, skipBlanks, unquote, wordAt } from './parse'
-import { hasOpaqueSubstitution, publicationOf } from './publish'
+import { hasOpaqueSubstitution, printedText, publicationOf } from './publish'
 
 interface Target { readonly at: number, readonly path: string }
 
@@ -168,6 +169,17 @@ function stdinSource(cmd: string, scrubbed: string, segment: Segment, all: reado
   return files.length > 0 ? publishes(files) : publishes([], [cmd.slice(previous.start, segment.start + segment.text.length).trim()])
 }
 
+// `echo 'git add -f .env' | bash` runs the echoed text. A script piped from a
+// file or a download is beyond what the command line shows.
+function pipedScript(cmd: string, scrubbed: string, all: readonly Segment[], index: number, publication: Publication): string[] {
+  const previous = all[index - 1]
+  if (!publication.stdinScript || !isPipedFrom(scrubbed, all[index]!, previous)) {
+    return []
+  }
+  const text = printedText(cmd, previous)
+  return text === null ? [] : [text]
+}
+
 const normalise = (path: string): string => path.replace(/^(?:\.\/)+/, '')
 
 /**
@@ -222,7 +234,7 @@ function messageFiles(cmd: string, scrubbed: string, depth = 0): Published {
       else
         published.files.push(path)
     }
-    for (const script of publication.scripts) {
+    for (const script of [...publication.scripts, ...pipedScript(cmd, scrubbed, all, index, publication)]) {
       const inner = depth < MAX_SCRIPT_DEPTH ? messageFiles(script, scrubShell(script), depth + 1) : publishes([], [script.trim()])
       published.unresolved.push(...inner.unresolved)
       inner.files.forEach(path => place(path, moved || publication.elsewhere))

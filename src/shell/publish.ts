@@ -1,5 +1,5 @@
 import type { Heredoc, Segment } from './parse'
-import { ANSI_C_STRING, ARGUMENTS_FROM_STDIN, CAT_HEREDOC, CLOSING_PAREN, COMMAND_RUNNERS, ENV_VALUED_OPTION, FIELD_FROM_FILE, GH_GRAMMARS, GH_WRITES, GIT_GRAMMARS, GIT_PLACE_OPTION, GIT_VALUED_GLOBAL, LITERAL_ECHO, LOGIN_OPTION, REDIRECT_OPERATOR, RUNNER_COMMAND_OPTION, SHELL_COMMAND_OPTION, SHELLS, SPLIT_STRING_OPTION, WATCH_VALUED_OPTION } from './constants'
+import { ANSI_C_STRING, ARGUMENTS_FROM_STDIN, CAT_HEREDOC, CLOSING_PAREN, COMMAND_RUNNERS, ENV_VALUED_OPTION, FIELD_FROM_FILE, GH_GRAMMARS, GH_WRITES, GIT_GRAMMARS, GIT_PLACE_OPTION, GIT_VALUED_GLOBAL, HEREDOC_INTO_CAT, LITERAL_ECHO, LITERAL_STDIN, LOGIN_OPTION, REDIRECT_OPERATOR, RUNNER_COMMAND_OPTION, SHELL_COMMAND_OPTION, SHELL_STDIN_OPTION, SHELL_VALUED_OPTION, SHELLS, SPLIT_STRING_OPTION, WATCH_VALUED_OPTION } from './constants'
 import { heredocAt, skipBlanks, unquote, wordAt } from './parse'
 
 type LongOption = readonly [name: string, shortestPrefix: number, valued: boolean]
@@ -25,6 +25,8 @@ export interface Publication {
   readonly scripts: string[]
   /** It runs git, or its scripts, in another directory, where a relative path means something else. */
   readonly elsewhere: boolean
+  /** It is a shell that reads its script from stdin. */
+  readonly stdinScript: boolean
 }
 
 interface Word { readonly value: string, readonly at: number }
@@ -35,7 +37,7 @@ interface Parsed { readonly options: Option[], readonly operands: string[] }
 
 const COMMANDS = new Set(['git', 'gh', 'eval', ...SHELLS])
 
-const NOTHING: Publication = Object.freeze({ publishes: false, content: false, files: [], unresolved: [], scripts: [], elsewhere: false })
+const NOTHING: Publication = Object.freeze({ publishes: false, content: false, files: [], unresolved: [], scripts: [], elsewhere: false, stdinScript: false })
 
 const nameOf = (word: Word): string => word.value.slice(word.value.lastIndexOf('/') + 1)
 
@@ -211,8 +213,9 @@ function gh(words: readonly Word[], fromStdin: boolean, text: string): Publicati
 
 /**
  * The shell code a segment hands to a shell of its own: `bash -c '…'`,
- * `eval …`, or a heredoc fed to a shell. A script read from a file or a pipe
- * is beyond what a command line shows.
+ * `eval …`, or a heredoc fed to a shell. A script read from a file is beyond
+ * what a command line shows; one piped in is the caller's to find, since it
+ * sees the stage before.
  */
 function scriptsOf(cmd: string, words: readonly Word[], heredocs: readonly number[], hereStrings: readonly string[], command: number): string[] {
   const name = nameOf(words[command]!)
@@ -225,6 +228,50 @@ function scriptsOf(cmd: string, words: readonly Word[], heredocs: readonly numbe
     return script ? [script.value] : []
   }
   return [...hereStrings, ...heredocs.map(at => heredocAt(cmd, at)).filter((doc): doc is Heredoc => doc !== null).map(doc => doc.body)]
+}
+
+// Without `-c`, a shell runs its first operand as a script file, and reads
+// its script from stdin only when it has none or is given `-s`.
+function readsScriptFromStdin(rest: readonly Word[]): boolean {
+  for (let k = 0; k < rest.length; k++) {
+    const word = rest[k]!.value
+    if (SHELL_STDIN_OPTION.test(word)) {
+      return true
+    }
+    if (word === '-' || word === '--') {
+      return k + 1 === rest.length
+    }
+    if (!/^[-+]/.test(word)) {
+      return false
+    }
+    if (SHELL_VALUED_OPTION.test(word)) {
+      k++
+    }
+  }
+  return true
+}
+
+/**
+ * The text an `echo`, `printf` or `cat <<EOF` stage prints, or `null` for any
+ * other stage. Its `$` and backticks are kept, so a substitution the shell
+ * would fill in still shows as one.
+ */
+export function printedText(cmd: string, stage: Segment): string | null {
+  const { words, heredocs } = wordsOf(cmd, stage)
+  if (HEREDOC_INTO_CAT.test(cmd.slice(stage.start, stage.start + stage.text.length))) {
+    return (heredocs.length > 0 ? heredocAt(cmd, heredocs[0]!)?.body : undefined) ?? null
+  }
+  if (!LITERAL_STDIN.test(stage.text)) {
+    return null
+  }
+  const printer = words.findIndex(w => nameOf(w) === 'echo' || nameOf(w) === 'printf')
+  let args = words.slice(printer + 1)
+  if (nameOf(words[printer]!) === 'echo') {
+    const first = args.findIndex(w => !/^-[neE]+$/.test(w.value))
+    args = first < 0 ? [] : args.slice(first)
+  }
+  // zsh's and dash's echo, and every printf, turn `\n` into a line break.
+  return args.map(w => w.value).join(' ').replace(/\\([nt])/g, (_escape, char: string) => char === 'n' ? '\n' : '\t')
 }
 
 // `env -S` splits its string into the command and appends the words after
@@ -309,7 +356,9 @@ export function publicationOf(cmd: string, segment: Segment): Publication {
     if (name === 'gh') {
       return gh(rest, fromStdin, text)
     }
-    return { ...NOTHING, scripts: scriptsOf(cmd, words, heredocs, hereStrings, command) }
+    const stdinScript = name !== 'eval' && heredocs.length === 0 && hereStrings.length === 0
+      && !rest.some(w => SHELL_COMMAND_OPTION.test(w.value)) && readsScriptFromStdin(rest)
+    return { ...NOTHING, scripts: scriptsOf(cmd, words, heredocs, hereStrings, command), stdinScript }
   }
   return NOTHING
 }
