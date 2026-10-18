@@ -220,9 +220,10 @@ findSecrets('postgres://app:$PG_PASSWORD@db.prod.internal/app') // [] (variable 
 | `url-password` | Password in any other URL, to a host that resolves | `https://user:<password>@host.tld` | — |
 | `authorization-header` | Bearer, Basic or token credential in an `Authorization` header | `Authorization: Bearer ••••` | — |
 | `curl-user-password` | Password passed to `curl -u` | `curl -u user:<password>` | — |
-| `generic-secret` | Random-looking value under a secret-sounding name | `API_TOKEN=••••`, `--api-key ••••` | — |
+| `mysql-password` | Password glued to `-p` on a `mysql`, `mysqldump` or `mariadb` command line | `mysql -u user -p<password>` | — |
+| `generic-secret` | Random-looking value under a secret-sounding name | `API_TOKEN=••••`, `--api-key ••••`, `<password>••••</password>` | — |
 
-The last four are fallbacks: where one overlaps a provider rule's finding, only the provider's is reported. `generic-secret` judges the value with the randomness test from [ripsecrets](https://github.com/sirwart/ripsecrets) (distinct characters, character-class balance and common bigrams) and drops runs of the alphabet, UUIDs, member paths such as `process.env.TOKEN`, file paths and names that hold a hash or public key.
+The last five are fallbacks: where one overlaps a provider rule's finding, only the provider's is reported. `generic-secret` judges the value with the randomness test from [ripsecrets](https://github.com/sirwart/ripsecrets) (distinct characters, character-class balance and common bigrams) and drops runs of the alphabet, UUIDs, member paths such as `process.env.TOKEN`, file paths and names that hold a hash or public key.
 
 For URIs, AWS secret keys and Telegram tokens the finding spans only the secret part, not the user, host or variable name.
 
@@ -380,12 +381,12 @@ export function scrub(line: string): string {
 | Runtime dependencies | 0 | 0 | 1 (its wasm build) | several | — |
 | Shell-command analysis | yes | no | no | no | no |
 
-The string scanners above cover far more providers than shell-secrets: @sanity-labs/secret-scan ships over 1,100 rules against its 38. Use one of them, or gitleaks or secretlint for a repository and its history, when coverage is what you need. Use shell-secrets when the input is a shell command or an agent's tool call and you need to know what the command does with the secret — exports it, writes it to a file, or puts it in a commit message — and where a false positive costs a blocked action.
+The string scanners above cover far more providers than shell-secrets: @sanity-labs/secret-scan ships over 1,100 rules against its 39. Use one of them, or gitleaks or secretlint for a repository and its history, when coverage is what you need. Use shell-secrets when the input is a shell command or an agent's tool call and you need to know what the command does with the secret — exports it, writes it to a file, or puts it in a commit message — and where a false positive costs a blocked action.
 
 ## Limits
 
 - A secret with no recognisable shape is found only under a secret-sounding name, and only when it looks random: a human-chosen `password = "summer2024"` is not reported.
-- 38 rules, not hundreds. Add your own for the services you use.
+- 39 rules, not hundreds. Add your own for the services you use.
 - No git history scanning; the CLI only installs and runs the agent hook.
 - macOS and Linux only: the hook command runs through a POSIX shell.
 - Shell parsing is best effort. A command it cannot read is not treated as a plain write, which is the stricter answer.

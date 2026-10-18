@@ -79,6 +79,7 @@ export const fake = {
   urlPassword: () => p('https://deploy:', rand(20), '@registry.internal.io/v2'),
   authorizationHeader: () => p('-H "Author', 'ization: Bearer ', rand(40), '"'),
   curlUser: () => p('curl -u deploy:', rand(20), ' https://api.internal.io'),
+  mysqlPassword: () => p('mysql -h db.internal.io -u deploy -', 'p', rand(20), ' shop'),
   genericAssignment: () => p('API_', 'TOKEN=', rand(32)),
   genericOption: () => p('deploy --api', '-key ', rand(32)),
 }
@@ -139,6 +140,7 @@ export const RULE_OF: Record<keyof typeof fake, string> = {
   urlPassword: 'url-password',
   authorizationHeader: 'authorization-header',
   curlUser: 'curl-user-password',
+  mysqlPassword: 'mysql-password',
   genericAssignment: 'generic-secret',
   genericOption: 'generic-secret',
 }

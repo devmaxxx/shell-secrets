@@ -62,4 +62,6 @@ export const CLASSES: [RegExp, number][] = [[/\d/, 10], [/[A-Z]/, 26], [/[a-z]/,
 // that reached the generic rule is a blob, not a credential typed in.
 export const MAX_JUDGED_LENGTH = 100
 
-export const SECRET_NAME = '(?:(?:api|access|auth|client|private|secret|signing|encryption|master|app|service)[_.-]?key|token|secret|passw(?:or)?d|pwd|credential)'
+// `pass` only as a word of its own (`DB_PASS`, `smtp.pass`), so `passport`
+// and `passenger` are not names; a camelCase `dbPass` is lost to the `i` flag.
+export const SECRET_NAME = '(?:(?:api|access|auth|client|private|secret|signing|encryption|master|app|service)[_.-]?key|token|secret|passw(?:or)?d|passphrase|pass(?![a-z])|pwd|credential)'

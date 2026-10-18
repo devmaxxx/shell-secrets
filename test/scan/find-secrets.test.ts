@@ -277,6 +277,13 @@ describe('a secret-named value that is not a secret', () => {
     'a digest named by its suffix': `token_sha256 = "${rand(64, '0123456789abcdef')}"`,
     'a public key': `stripe_publishable_key: ${rand(32)}`,
     'a file named after a token': `"cloudflare_api_token.go": "${rand(64, '0123456789abcdef')}"`,
+    'a word that ends in pass': `bypass_proxy = "corp-proxy.internal.example"`,
+    'a passphrase of words in XML': '<passphrase>correcthorsebatterystaple</passphrase>',
+    'a generic type before a method name': 'Promise<AccessToken> getAccessTokenForUser();',
+    'a mysql password prompt': 'mysql -h db.internal.io -u deploy -p shop',
+    'a mysql password from a variable': 'mysql -u deploy -p"$DB_PASSWORD" shop',
+    'a mysql stand-in password': 'mysql -uroot -proot',
+    'a docker port next to a mysql name': 'docker run --name mysql -p3306:3306 mysql:8',
   }
   for (const [name, text] of Object.entries(cases)) {
     it(`ignores ${name}`, () => {
@@ -313,6 +320,21 @@ describe('a secret-named value that is not a secret', () => {
     expect(ids(`headers['Authorization'] = 'Bearer ${value}'`)).toEqual(['authorization-header'])
     expect(ids(`curl -su deploy:${value} https://api.internal.io`)).toEqual(['curl-user-password'])
     expect(ids(`password=${value.slice(0, 6)}!${value.slice(6, 12)}#${value.slice(12)}`)).toEqual(['generic-secret'])
+  })
+
+  it('reads the other names a password goes by, and a password in XML', () => {
+    const value = rand(28)
+    for (const text of [
+      `DB_PASS=${value}`,
+      `pass=${value}`,
+      `smtp.pass: "${value}"`,
+      `passphrase: ${value}`,
+      `GPG_PASSPHRASE=${value}`,
+      `<password>${value}</password>`,
+      `<db.password>${value}</db.password>`,
+    ])
+      expect(ids(text), text).toEqual(['generic-secret'])
+    expect(ids(`mysqldump -uroot -p'${value}' shop`)).toEqual(['mysql-password'])
   })
 
   it('keeps hundreds of thousands of findings without overflowing the stack', () => {
