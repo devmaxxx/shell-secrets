@@ -522,4 +522,19 @@ describe('words and commands as bash splits them', () => {
     expect(scan('gh -R o/r release create v1 notes.md').files).toEqual(['notes.md'])
     expect(scan('gh -R o/r pr view 4 -F body')).toEqual({ files: [], unresolved: [] })
   })
+
+  it('drops a line continuation between words and inside one, as bash does', () => {
+    for (const cmd of [
+      'git \\\n  add -f .env',
+      'git add \\\n-f .env',
+      'gi\\\nt add -f .env',
+      'git add -f .e\\\nnv',
+      'sh -c "git add \\\n-f .env"',
+    ])
+      expect(scan(cmd).files, JSON.stringify(cmd)).toEqual(['.env'])
+    expect(scan('git add -f \\\n  a.txt \\\n  b.txt').files).toEqual(['a.txt', 'b.txt'])
+    expect(scan(`git commit -F 'm\\\nsg'`).files).toEqual(['m\\\nsg'])
+    expect(findSecretsInCommand('echo ok | tee \\\n  .env').redirectTargets).toEqual(['.env'])
+    expect(onlyWritesTo(`echo ${fake.github()} > .e\\\nnv`, exactlyEnv)).toBe(true)
+  })
 })

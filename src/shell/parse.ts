@@ -109,6 +109,10 @@ export function wordAt(cmd: string, index: number): string {
   return WORD.exec(cmd)?.[0] ?? ''
 }
 
+// Outside single quotes a backslash-newline only continues the line, and bash
+// drops it: `gi\<newline>t` runs git.
+const unescape = (char: string): string => char === '\n' ? '' : char
+
 /**
  * The word with its quotes and escapes removed, as the shell would pass it.
  * `$` and backticks survive, so a caller can still tell the word is not literal.
@@ -117,7 +121,7 @@ export function unquote(word: string): string {
   return word.replace(
     /\$?"((?:[^"\\]|\\[\s\S])*)"|\$?'([^']*)'|\\([\s\S])/g,
     (_all, double: string | undefined, single: string | undefined, escaped: string | undefined) =>
-      double !== undefined ? double.replace(/\\(["\\$`])/g, '$1') : (single ?? escaped)!,
+      double !== undefined ? double.replace(/\\(["\\$`\n])/g, (_escape, char: string) => unescape(char)) : single ?? unescape(escaped!),
   )
 }
 

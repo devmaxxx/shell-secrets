@@ -87,7 +87,8 @@ export const REDIRECT = /(?:\d+|&)?>(?:>|\||&(?![\d-]))?(?!&[\d-])[ \t]*/g
 
 export const TEE = new RegExp(`^\\s*${COMMAND_PREFIX}tee(?=\\s|$)`)
 
-export const BLANKS = /[ \t]*/y
+// A line continuation between words separates them like a blank.
+export const BLANKS = /(?:[ \t]|\\\n)*/y
 
 // After `<<`: an optional `-`, then the delimiter, bare, quoted or escaped.
 export const HEREDOC_DELIMITER = /(-?)[ \t]*(["']?)\\?(\w+)\2/y
