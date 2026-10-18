@@ -2,7 +2,7 @@ import type { CommandFinding, CommandScan, ScanOptions } from '../types'
 import type { Segment } from './parse'
 import type { Publication } from './publish'
 import { findSecrets } from '../scan/find'
-import { ASSIGNMENT_BEFORE, ASSIGNMENT_LOOKBEHIND, CHANGES_DIRECTORY, EXPANDED_INLINE_INPUT, EXPANDS_VARIABLE, FILE_READER, HARMLESS_DEVICE, HEREDOC_INTO_CAT, INPUT_REDIRECT, LINE_COUNT, LITERAL_STDIN, MAX_COMMAND_LENGTH, MAX_SCRIPT_DEPTH, READS_INTO_VARIABLE, REDIRECT, REDIRECT_OPERATOR, TEE } from './constants'
+import { ASSIGNMENT_BEFORE, ASSIGNMENT_LOOKBEHIND, CHANGES_DIRECTORY, DEFINES_FUNCTION, EXPANDED_INLINE_INPUT, EXPANDS_VARIABLE, FILE_READER, HARMLESS_DEVICE, HEREDOC_INTO_CAT, INPUT_REDIRECT, LINE_COUNT, LITERAL_STDIN, MAX_COMMAND_LENGTH, MAX_SCRIPT_DEPTH, READS_INTO_VARIABLE, REDIRECT, REDIRECT_OPERATOR, TEE } from './constants'
 import { hasSubstitution, scrubShell, segments, skipBlanks, unquote, wordAt } from './parse'
 import { hasOpaqueSubstitution, printedText, publicationOf } from './publish'
 
@@ -256,13 +256,16 @@ function messageFiles(cmd: string, scrubbed: string, depth = 0): Published {
 }
 
 // `git commit -m "$(cat .env)"` publishes the substitution's output, and
-// `k=$(cat .env); git commit -m "$k"` the variable it fills.
+// `k=$(cat .env); git commit -m "$k"` the variable it fills. A function body
+// runs when it is called, so on a line that defines one, `f "$(cat .env)"`
+// after the body fills its `$1` all the same.
 function hasHiddenContent(cmd: string, scrubbed: string, segment: Segment): boolean {
   if (hasOpaqueSubstitution(cmd, segment.start))
     return true
   const own = cmd.slice(segment.start, segment.start + segment.text.length)
+  const filledUntil = DEFINES_FUNCTION.test(scrubbed) ? cmd.length : segment.start
   return EXPANDS_VARIABLE.test(own)
-    && (hasOpaqueSubstitution(cmd, 0, segment.start) || READS_INTO_VARIABLE.test(scrubbed.slice(0, segment.start)))
+    && (hasOpaqueSubstitution(cmd, 0, filledUntil) || READS_INTO_VARIABLE.test(scrubbed.slice(0, filledUntil)))
 }
 
 function isLiteralWrite(cmd: string, scrubbed: string, all: readonly Segment[], target: Target): boolean {

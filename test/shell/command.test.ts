@@ -526,6 +526,18 @@ describe('words and commands as bash splits them', () => {
     expect(scan('set -- a b; git commit -m "$1"').unresolved).toEqual([])
   })
 
+  it('counts a substitution passed to a function as content its body may publish', () => {
+    for (const cmd of [
+      'f() { git commit -m "$1"; }; f "$(cat .env)"',
+      'function f { gh pr comment 1 --body "$*"; }\nf $(cat .env)',
+      'f() { git commit -m "$msg"; }; msg=$(cat .env); f',
+      'f() { read -r k; git commit -m "$k"; }; f < .env',
+    ])
+      expect(scan(cmd).unresolved, cmd).not.toEqual([])
+    expect(scan('f() { git commit -m "$1"; }; f fix').unresolved).toEqual([])
+    expect(scan('git commit -m "$1"; echo "$(date)"').unresolved).toEqual([])
+  })
+
   it('skips the separate value of each git global option that takes one', () => {
     for (const global of ['--attr-source HEAD', '--shallow-file x', '--namespace x', '--config-env a=B', '--attr-source=HEAD'])
       expect(scan(`git ${global} add -f .env`).files, global).toEqual(['.env'])

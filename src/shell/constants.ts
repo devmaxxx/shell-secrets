@@ -204,3 +204,6 @@ export const CLOSING_PAREN = /\s*\)/y
 export const EXPANDS_VARIABLE = /\$[\w{@*]/
 
 export const READS_INTO_VARIABLE = /(?:^|[\s;&|(])(?:read|mapfile|readarray)\s/
+
+// `f() …` or `function f …`.
+export const DEFINES_FUNCTION = /(?:^|[\s;&|(){}])(?:function\s+[^\s;&|(){}]|[A-Z_][\w.:-]*\s*\(\s*\))/i
