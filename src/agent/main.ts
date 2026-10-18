@@ -19,7 +19,13 @@ export function main(argv: string[], io: CliIO): number {
   if ((command === 'install' || command === 'uninstall') && (agent === 'claude' || agent === 'codex')) {
     const project = flags.includes('--project')
     const file = configFile(agent, project)
-    configure(file, agent, command === 'install' ? hookCommand(io.script, project) : null)
+    try {
+      configure(file, agent, command === 'install' ? hookCommand(io.script, project) : null)
+    }
+    catch (error) {
+      console.error(`shell-secrets: ${(error as Error).message}`)
+      return 1
+    }
     process.stdout.write(`${command === 'install' ? 'Installed in' : 'Removed from'} ${file}\n`)
     if (command === 'install' && agent === 'codex')
       process.stdout.write('Codex runs a new hook only after you trust it: open /hooks in Codex once.\n')

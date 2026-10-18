@@ -158,6 +158,22 @@ describe('cli', () => {
     expect(JSON.parse(readFileSync(file, 'utf8')).hooks.PreToolUse).toHaveLength(1)
   })
 
+  it('refuses, and leaves the file as it is, when the settings are not an object it can extend', () => {
+    for (const text of ['null', '[]', '"x"', '{', '{"hooks": []}', '{"hooks": {"PreToolUse": {}}}']) {
+      const home = mkdtempSync(join(tmpdir(), 'ss-'))
+      const file = join(home, '.claude/settings.json')
+      mkdirSync(join(home, '.claude'))
+      writeFileSync(file, text)
+      logs.mockClear()
+      for (const command of ['install', 'uninstall']) {
+        expect(run([command, 'claude'], '', home), text).toBe(1)
+        expect(errors.mock.lastCall?.[0], text).toContain(file)
+      }
+      expect(readFileSync(file, 'utf8'), text).toBe(text)
+      expect(logs).not.toHaveBeenCalled()
+    }
+  })
+
   it('writes the Codex matcher to hooks.json', () => {
     const home = mkdtempSync(join(tmpdir(), 'ss-'))
     run(['install', 'codex'], '', home)

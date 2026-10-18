@@ -26,6 +26,29 @@ export function hookCommand(script: string, project: boolean): string {
   return `${command} || exit 2`
 }
 
+const isObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value)
+
+// Rewriting a file of another shape would drop what the agent reads from it,
+// so it is refused before anything is written.
+function readSettings(file: string): Settings {
+  if (!existsSync(file)) {
+    return {}
+  }
+  let settings: unknown
+  try {
+    settings = JSON.parse(readFileSync(file, 'utf8'))
+  }
+  catch (error) {
+    throw new Error(`${file} is not valid JSON (${(error as Error).message}); it was left unchanged`)
+  }
+  const hooks = isObject(settings) ? settings.hooks : undefined
+  const preToolUse = isObject(hooks) ? hooks.PreToolUse : undefined
+  if (!isObject(settings) || (hooks !== undefined && !isObject(hooks)) || (preToolUse !== undefined && !Array.isArray(preToolUse))) {
+    throw new Error(`${file} does not hold a settings object with a hooks object and a PreToolUse list; it was left unchanged`)
+  }
+  return settings as Settings
+}
+
 function isOwnHook(hook: { command?: unknown }): boolean {
   return typeof hook.command === 'string' && OWN_HOOK.test(hook.command)
 }
@@ -34,7 +57,7 @@ function isOwnHook(hook: { command?: unknown }): boolean {
 // move leaves exactly one hook pointing at the current build. Entries it does
 // not understand are kept as they are.
 export function configure(file: string, agent: Agent, command: string | null): void {
-  const settings: Settings = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : {}
+  const settings = readSettings(file)
   const hooks = settings.hooks ?? {}
   const kept = (Array.isArray(hooks.PreToolUse) ? hooks.PreToolUse : [])
     .map(entry => Array.isArray(entry?.hooks) ? { ...entry, hooks: entry.hooks.filter(h => !isOwnHook(h)) } : entry)
