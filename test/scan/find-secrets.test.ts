@@ -221,6 +221,13 @@ describe('a secret behind base64', () => {
     expect(ids(`echo ${b64(`export T=${fake.anthropic()}`)} | base64 -d >> ~/.zshrc`)).toEqual(['anthropic-api-key'])
   })
 
+  it('decodes a blob assigned with =, as in an .env file, a flag or a query string', () => {
+    const encoded = b64(`T ${fake.github()}`)
+    expect(ids(`DATA=${encoded}`)).toEqual(['github-token'])
+    expect(ids(`deploy --payload=${encoded}`)).toEqual(['github-token'])
+    expect(ids(`https://hooks.internal.io/in?d=${encoded}`)).toEqual(['github-token'])
+  })
+
   it('previews a secret encoded twice by the secret, not by the layer between', () => {
     const token = fake.github()
     expect(findSecrets(b64(b64(token)))[0]!.preview).toBe(`${token.slice(0, 4)}********`)
