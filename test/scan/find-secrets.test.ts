@@ -277,13 +277,19 @@ describe('a secret-named value that is not a secret', () => {
     'a digest named by its suffix': `token_sha256 = "${rand(64, '0123456789abcdef')}"`,
     'a public key': `stripe_publishable_key: ${rand(32)}`,
     'a file named after a token': `"cloudflare_api_token.go": "${rand(64, '0123456789abcdef')}"`,
-    'a word that ends in pass': `bypass_proxy = "corp-proxy.internal.example"`,
+    'a word that starts with pass': `passport = "${rand(28)}"`,
     'a passphrase of words in XML': '<passphrase>correcthorsebatterystaple</passphrase>',
     'a generic type before a method name': 'Promise<AccessToken> getAccessTokenForUser();',
     'a mysql password prompt': 'mysql -h db.internal.io -u deploy -p shop',
     'a mysql password from a variable': 'mysql -u deploy -p"$DB_PASSWORD" shop',
     'a mysql stand-in password': 'mysql -uroot -proot',
     'a docker port next to a mysql name': 'docker run --name mysql -p3306:3306 mysql:8',
+    'a mysql password from a substitution': p('mysql -u deploy -', 'p"$(cat /run/secrets/db)" shop'),
+    'a mysql password from a backquote': p('mysql -u deploy -', 'p`cat /run/secrets/db` shop'),
+    'a mysql password from an escaped variable': p('mysql -u deploy -', 'p$$DB_PASSWORD shop'),
+    'a mysql password from a batch variable': p('mysql -u deploy -', 'p%DB_PASSWORD% shop'),
+    'a mysql password from a template': p('mysql -u deploy -', 'p{db_password} shop'),
+    'a mysql password from a placeholder': p('mysql -u deploy -', 'p@DB_PASSWORD@ shop'),
   }
   for (const [name, text] of Object.entries(cases)) {
     it(`ignores ${name}`, () => {
@@ -327,6 +333,7 @@ describe('a secret-named value that is not a secret', () => {
     for (const text of [
       `DB_PASS=${value}`,
       `pass=${value}`,
+      `dbPass=${value}`,
       `smtp.pass: "${value}"`,
       `passphrase: ${value}`,
       `GPG_PASSPHRASE=${value}`,
@@ -335,6 +342,19 @@ describe('a secret-named value that is not a secret', () => {
     ])
       expect(ids(text), text).toEqual(['generic-secret'])
     expect(ids(`mysqldump -uroot -p'${value}' shop`)).toEqual(['mysql-password'])
+  })
+
+  it('reads a mysql password wherever the client stands and however its line is broken', () => {
+    const value = rand(20)
+    for (const text of [
+      `mysql -p${value} shop`,
+      `/usr/bin/mysql -u root -p${value} shop`,
+      `bash -c "mysql -u root -p${value} shop"`,
+      `ssh db 'mysql -u root -p${value} shop'`,
+      `mysql -u root \\\n  -p${value} shop`,
+      `mysql \\\n-p${value} shop`,
+    ])
+      expect(ids(text), text).toEqual(['mysql-password'])
   })
 
   it('keeps hundreds of thousands of findings without overflowing the stack', () => {

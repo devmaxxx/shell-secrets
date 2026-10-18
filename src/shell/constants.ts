@@ -1,8 +1,14 @@
 import type { Grammar } from './publish'
 
-// Group 4 is the rest of the header line, kept because a `&& gh …` can live there.
-// `<<<` is a here-string, which has no body.
-const HEREDOC = /(?<!<)(<<-?\s*(["']?)(\w+)\b\2)([^\n]*)\n/
+// A delimiter is a word: bare, quoted whole or in part, or with a backslash
+// before a character. Quoting any of it keeps the body from being expanded, and
+// the body ends on a line that says the word with the quotes taken out.
+const HEREDOC_WORD = String.raw`(?:\\[\s\S]|"[^"]*"|'[^']*'|[^\s;&|<>()"'\\])+`
+
+// Only the opener: the header line that follows is found by the caller, since
+// a quote or a backslash can carry it over a newline. `<<<` is a here-string,
+// which has no body.
+const HEREDOC = new RegExp(String.raw`(?<!<)(<<-?[ \t]*(${HEREDOC_WORD}))`)
 
 // In `$'…'` a backslash escapes the quote; in plain `'…'` it does not.
 const ANSI_C_QUOTED = /\$'(?:[^'\\]|\\[\s\S])*'/
@@ -27,8 +33,9 @@ const PROCESS_ID = /\$\$/
 const BEFORE_COMMENT = /[ \t\n;&|()]/
 
 // The `)` that closes a `$(…)` is part of its word, so `echo $(:)# x` prints
-// `# x`. Only a substitution with no parenthesis inside is told apart.
-const COMMENT = /(?:^|[ \t\n;&|(]|\)(?<!\$\([^()]*\)))#[^\n]*/
+// `# x`. Only a substitution with no parenthesis inside is told apart, and not
+// one that holds a `case`, whose pattern `y)` ends in a `)` that closes nothing.
+const COMMENT = /(?:^|[ \t\n;&|(]|\)(?<!\$\((?:(?!\bcase\b)[^()])*\)))#[^\n]*/
 
 export const COMMENT_OPENER = new RegExp(`^${BEFORE_COMMENT.source}#`)
 
@@ -56,10 +63,11 @@ function wrapperOptions(id: string, valued: string, longValued = ''): string {
   return `(?=(?<${id}>(?:\\s+(?:${short}${long}-\\S+))*))\\k<${id}>`
 }
 
+// `xargs` is not one: it hands its stdin to the command as arguments, so what
+// `xargs echo` or `xargs cat` prints is not the text on the command line.
 const WRAPPERS = [
   `(?:sudo|doas)${wrapperOptions('sudoOptions', 'ugCDhpRrTtU', SUDO_LONG)}`,
   `env${wrapperOptions('envOptions', 'uCSP')}`,
-  `xargs${wrapperOptions('xargsOptions', 'nIdLsEPa')}`,
   `exec${wrapperOptions('execOptions', 'a')}`,
   `time${wrapperOptions('timeOptions', 'fo')}`,
   `(?:command|builtin|nohup)${wrapperOptions('plainOptions', '')}`,
@@ -67,9 +75,8 @@ const WRAPPERS = [
 
 /**
  * Leading env assignments, wrappers and keywords that still leave the next
- * word the command. A wrapper's own options (`sudo -u root`, `env -i`,
- * `xargs -n 1`) are skipped. Embed it at most once per regex: it holds named
- * groups.
+ * word the command. A wrapper's own options (`sudo -u root`, `env -i`) are
+ * skipped. Embed it at most once per regex: it holds named groups.
  */
 const COMMAND_PREFIX
   = `(?:(?:[A-Za-z_][A-Za-z0-9_]*=\\S*|${WRAPPERS}|then|do|else|elif|if|while|until|!)\\s+)*(?:[\\w./~-]*\\/)?`
@@ -77,10 +84,10 @@ const COMMAND_PREFIX
 // A brace opens or closes a group only as a word of its own. Inside a word
 // (`find -exec … {} +`, `${X}`, `{a,b}`) it is text, and cutting the segment
 // there would drop the arguments after it. So is the `}` that closes a `${`,
-// even after a blank, as in `${X:- }`.
-export const SEGMENT = /(?:[^\n;&|(){}`]|(?<=[^\s;&|()`])[{}]|[{}](?=[^\s;&|()`])|\}(?<=\$\{[^}\n]*\}))+/g
+// even after a blank, as in `${X:- }`. An `&` is one only outside a redirect:
+// `2>&1`, `>&2` and `&>file` belong to their command.
+export const SEGMENT = /(?:[^\n;&|(){}`]|(?<=[<>])&|&(?=>)|(?<=[^\s;&|()`])[{}]|[{}](?=[^\s;&|()`])|\}(?<=\$\{[^}\n]*\}))+/g
 
-// A backquoted substitution runs to the next backquote.
 const BACKQUOTED = /`(?:[^`\\]|\\[\s\S])*`/
 
 // A character inside a parenthesis that opens nothing. A `$` before `(` or `'`
@@ -153,17 +160,18 @@ export const LINE_PIECE = new RegExp(
   'g',
 )
 
-// After `<<`: an optional `-`, then the delimiter, bare, quoted or escaped.
-export const HEREDOC_DELIMITER = /(-?)[ \t]*(["']?)\\?(\w+)\2/y
+// After `<<` and its `-`, if any.
+export const HEREDOC_DELIMITER = new RegExp(String.raw`[ \t]*(${HEREDOC_WORD})`, 'y')
 
 export const REDIRECT_OPERATOR = /&?[<>]+[&|]?/y
 
 export const FILE_READER = new RegExp(`^\\s*${COMMAND_PREFIX}(?:cat|head|tail)(?=\\s)`)
 
-export const HEREDOC_INTO_CAT = new RegExp(`^\\s*${COMMAND_PREFIX}cat(?:\\s+\\d?>>?\\s*\\S+)?\\s+<<-?\\s*(?<quote>['"]?)\\w+\\k<quote>`)
+export const HEREDOC_INTO_CAT = new RegExp(`^\\s*${COMMAND_PREFIX}cat(?:\\s+\\d?>>?\\s*\\S+)?\\s+<<-?[ \\t]*(?<word>${HEREDOC_WORD})`)
 
 // A heredoc or here-string the shell expands: `$(cat .env)` in its body is read.
-export const EXPANDED_INLINE_INPUT = /<<<|<<-?\s*\w/
+// A quote or a backslash at the start of the delimiter keeps the body as it is.
+export const EXPANDED_INLINE_INPUT = /<<<|<<-?[ \t]*[^\s'"\\]/
 
 export const LITERAL_STDIN = new RegExp(`^\\s*${COMMAND_PREFIX}(?:echo|printf)(?=\\s|$)`)
 
@@ -184,12 +192,25 @@ export const ASSIGNMENT_LOOKBEHIND = 256
 // hook's time budget, and a hook that times out lets the call run.
 export const MAX_COMMAND_LENGTH = 100_000
 
+// A stretch that holds a substitution repeats the text of the ones inside it,
+// so nesting multiplies what the passes over the stretches read: `a=$( ` a
+// few thousand times is quadratic. A line whose stretches add up to more than
+// this is blocked unread, since a hook that times out lets the call run.
+export const MAX_SEGMENT_TEXT = 10 * MAX_COMMAND_LENGTH
+
 // `bash -c "bash -c '…'"` is followed this many levels deep, then blocked.
 export const MAX_SCRIPT_DEPTH = 3
 
+// A double-quoted string ends at the next `"`, so a substitution in it that
+// holds quoted words of its own is cut into as many pieces as it has quotes.
+// Joining them again re-reads the text, so only this many are tried.
+export const MAX_QUOTED_PARTS = 8
+
 // A segment's words that name git, gh or a shell are tried as the command this
-// many at a time, so a line made of them stays linear.
-export const MAX_COMMAND_CANDIDATES = 8
+// many at a time, so a line made of them stays linear. It is far past the
+// words one command line puts before its real command, and a line with more
+// is blocked as unreadable.
+export const MAX_COMMAND_CANDIDATES = 64
 
 export const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'mksh', 'ash'])
 
@@ -200,7 +221,9 @@ export const SHELL_COMMAND_OPTION = /^-[A-Zabd-z]*c[A-Za-z]*$/
 
 export const SHELL_STDIN_OPTION = /^-[A-Za-rt-z]*s[A-Za-z]*$/
 
-export const SHELL_VALUED_OPTION = /^[-+][oO]$|^--(?:rcfile|init-file)$/
+// A long option that takes a value of its own. So does each `o` and `O` of a
+// short one, bundled or not: `-o pipefail`, `+O extglob`, `-eo pipefail`.
+export const SHELL_VALUED_LONG_OPTION = /^--(?:rcfile|init-file)$/
 
 // Programs that run a command handed to them as one string, through a shell
 // or by splitting it into words.
@@ -294,9 +317,27 @@ export const LITERAL_ECHO = /[ \t]*(?:echo|printf)(?:[ \t][^\n$`()<>|;&\\'"]*)?\
 export const CLOSING_PAREN = /\s*\)/y
 
 // `set -- $(cat .env)` fills the positional parameters as surely as `k=$(…)` fills a name.
-export const EXPANDS_VARIABLE = /\$[\w{@*]/
+// The shell drops a line continuation after the `$`, and zsh also reads `$=k`,
+// `$~k`, `$^k` and a name with letters beyond ASCII.
+export const EXPANDS_VARIABLE = /\$(?:\\\n)*[\w{@*=~^\u0080-\uFFFF]/
 
 export const READS_INTO_VARIABLE = /(?:^|[\s;&|(])(?:read|mapfile|readarray)\s/
+
+// A substitution that starts by reading a file: `$(cat .env)`, `$(< .env)`,
+// `` `sed p .env` ``. A list of readers cannot be complete.
+export const READING_SUBSTITUTION = /(?:\$\(|`)\s*(?:(?:sudo|command|env)\s+)*(?:(?:cat|head|tail|tac|sed|awk|grep|cut|tr|sort|base64|jq|xxd|od|strings|nl|rev|paste|less|more)(?=\s)|<(?![<(]))/
+
+// What lands in the author or committer of a commit git makes, and so in the
+// history anyone can read.
+export const IDENTITY_CONFIG = /^(?:user|author|committer)\.(?:name|email)=/i
+
+export const IDENTITY_ASSIGNMENT = /^(?:GIT_(?:AUTHOR|COMMITTER)_(?:NAME|EMAIL)|EMAIL)=/
+
+// `export GIT_AUTHOR_NAME=$(cat .env)` on an earlier part of the line.
+export const IDENTITY_FROM_READER = new RegExp(`(?:^|[\\s;&|(])${IDENTITY_ASSIGNMENT.source.slice(1)}["']?${READING_SUBSTITUTION.source}`)
+
+// What `gh api` and `gh workflow run` send as the body of a request.
+export const GH_FIELD_OPTIONS = ['F', 'f', 'field', 'raw-field', 'input', 'json']
 
 // `f() …` or `function f …`.
 export const DEFINES_FUNCTION = /(?:^|[\s;&|(){}])(?:function\s+[^\s;&|(){}]|[A-Z_][\w.:-]*\s*\(\s*\))/i

@@ -5,6 +5,14 @@ import { isGenericNonSecret, isNotASecretName, keyOf } from './generic'
 import { withoutTemplates } from './patterns'
 import { isRandom } from './randomness'
 
+// What the shell, a batch file or a template fills in before the client sees
+// it: `$(cat pw)`, `$$PW`, `%PW%`, `@PW@`, `{pw}`.
+const FILLED_IN = /^(?:\$[($]|`|(?:%\w+%|@\w+@|\{[\w.-]+\})$)/
+
+function isNotAMysqlPassword(value: string): boolean {
+  return isDevCredential('', value, '') || value.length < 4 || /^[\d.:]+(?:\/\w+)?$/.test(value) || FILLED_IN.test(value)
+}
+
 /**
  * Rules for secrets no prefix names. Each marks itself `fallback`, so it gives
  * way to a provider rule that matches the same span.
@@ -47,10 +55,11 @@ export const fallbackRules: readonly Rule[] = [
     env: null,
     // The MySQL clients take the password glued to `-p`; a bare `-p` prompts
     // for it. A docker `-p3306:3306` beside a container named mysql is a port.
-    pattern: /(?:^|[\s;&|(`])(?:mysql|mysqldump|mysqladmin|mysqlimport|mysqlcheck|mysqlshow|mysqlpump|mariadb(?:-dump|-admin)?)\s[^\n|;&]{0,500}?\s-p["']?([^\s'"]{1,256})/g,
+    // The client may stand in a path, in quotes or after a continuation line.
+    pattern: /(?:^|[\s;&|(`"'/])(?:mysql|mysqldump|mysqladmin|mysqlimport|mysqlcheck|mysqlshow|mysqlpump|mariadb(?:-dump|-admin)?)(?=\s)(?:\\\n|[^\n|;&]){1,500}?(?<=\s)-p["']?([^\s'"]{1,256})/g,
     prepare: withoutTemplates,
     secretGroup: 1,
-    ignore: match => isDevCredential('', match[1] ?? '', '') || (match[1] ?? '').length < 4 || /^[\d.:]+(?:\/\w+)?$/.test(match[1] ?? ''),
+    ignore: match => isNotAMysqlPassword(match[1] ?? ''),
     placeholders: false,
     fallback: true,
   },

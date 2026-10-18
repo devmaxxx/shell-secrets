@@ -1,6 +1,7 @@
 import type { GuardEnv } from '../../src'
 import { describe, expect, it } from 'vitest'
 import { checkToolCall } from '../../src'
+import { MAX_LISTED_UNSCANNED } from '../../src/guard/constants'
 import { fake } from '../support/fake'
 
 function env(files: Record<string, string> = {}): GuardEnv {
@@ -133,6 +134,13 @@ describe('checkToolCall', () => {
     expect(ids({ kind: 'shell', command: 'cat msg.txt && git commit -F msg.txt' }, env({ 'msg.txt': 'fix' }))).toEqual([])
   })
 
+  it('names a few of the files it could not scan and counts the rest', () => {
+    const listed: GuardEnv = { ...env(), listIgnored: () => Array.from({ length: 50 }, (_, i) => `dist/${i}.js`) }
+    const found = checkToolCall({ kind: 'shell', command: 'git add -f dist' }, listed)
+    expect(found.map(f => f.ruleId)).toEqual(Array.from<string>({ length: MAX_LISTED_UNSCANNED + 1 }).fill('unscanned-published-file'))
+    expect(found.map(f => f.preview).slice(-2)).toEqual(['dist/9.js', '40 more'])
+  })
+
   it('follows a patch that moves an ignored file into a tracked one', () => {
     const patch = ['*** Update File: .env', '*** Move to: config.js', '@@', `+${fake.github()}`].join('\n')
     expect(ids({ kind: 'patch', patch }, env())).toEqual(['github-token'])
@@ -226,7 +234,7 @@ describe('checkToolCall', () => {
       expect(asked).toEqual(['list dir', 'list ./dir'])
       const dirs = Array.from({ length: 100 }, (_, n) => `d${n}`)
       const many = counting()
-      expect(ids({ kind: 'shell', command: `git add -f ${dirs.join(' ')}` }, many.env)).toHaveLength(100)
+      expect(ids({ kind: 'shell', command: `git add -f ${dirs.join(' ')}` }, many.env)).toHaveLength(MAX_LISTED_UNSCANNED + 1)
       expect(many.asked).toHaveLength(32)
     })
   })

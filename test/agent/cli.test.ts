@@ -128,6 +128,16 @@ describe('cli', () => {
     expect(add('git add -u -f')).toBe(0)
   })
 
+  it('blocks a message file it will not read instead of waiting on it', () => {
+    const repo = mkdtempSync(join(tmpdir(), 'ss-msg-'))
+    spawnSync('git', ['init', '-q', repo])
+    const commit = (path: string): number => run(['hook'], JSON.stringify({ tool_name: 'Bash', tool_input: { command: `git commit -F ${path}` }, cwd: repo }))
+    writeFileSync(join(repo, 'msg.txt'), 'fix: x\n')
+    expect(commit('msg.txt')).toBe(0)
+    if (process.platform !== 'win32')
+      expect(commit('/dev/zero')).toBe(2)
+  })
+
   it('passes a clean call and an unknown tool', () => {
     expect(run(['hook'], JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'ls' } }))).toBe(0)
     expect(run(['hook'], JSON.stringify({ tool_name: 'Read', tool_input: { file_path: 'x' } }))).toBe(0)

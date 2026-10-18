@@ -1,7 +1,7 @@
 import type { Finding, ScanOptions } from '../types'
 import { findNewSecrets, findSecrets } from '../scan/find'
 import { findSecretsInCommand, onlyWritesTo } from '../shell/command'
-import { MAX_LOOKUPS, PATCH_BLANK, PATCH_FILE } from './constants'
+import { MAX_LISTED_UNSCANNED, MAX_LOOKUPS, PATCH_BLANK, PATCH_FILE } from './constants'
 
 /** An agent's tool call, reduced to what decides whether it leaks a secret. */
 export type ToolCall
@@ -55,10 +55,13 @@ function withinLookups(env: GuardEnv): GuardEnv {
       return known.get(path) as R
     }
   }
+  // The methods are called on `env`, not lifted off it, and copied one by one:
+  // an object that keeps its state on `this` or its methods on a prototype
+  // would lose both to a spread.
   return {
-    ...env,
-    isIgnored: limited(env.isIgnored, false),
-    listIgnored: env.listIgnored && limited(env.listIgnored, null),
+    isIgnored: limited(path => env.isIgnored(path), false),
+    readFile: path => env.readFile(path),
+    listIgnored: env.listIgnored && limited(path => env.listIgnored?.(path) ?? null, null),
   }
 }
 
@@ -70,26 +73,35 @@ function unlessIgnored(path: string | undefined, found: Finding[], env: GuardEnv
 
 function checkShell(command: string, env: GuardEnv, options: ScanOptions): Finding[] {
   const scan = findSecretsInCommand(command, options)
-  if (scan.findings.length > 0 && onlyWritesTo(command, env.isIgnored))
+  if (scan.findings.length > 0 && onlyWritesTo(command, path => env.isIgnored(path)))
     return []
   // git and gh publish these files verbatim, so their contents are part of the
   // call. One that cannot be read, or a source no file name pins down, blocks
   // the call: letting it through would read an unscanned file as "no file".
+  const unread: string[] = []
   const scanFile = (file: string): Finding[] => {
     const text = env.readFile(file)
-    return text === null ? [unscanned(file)] : findSecrets(text, options)
+    if (text === null)
+      unread.push(file)
+    return text === null ? [] : findSecrets(text, options)
   }
   const published = scan.messageFiles.flatMap((file) => {
-    if (env.readFile(file) !== null)
-      return scanFile(file)
+    const text = env.readFile(file)
+    if (text !== null)
+      return findSecrets(text, options)
     const inside = env.listIgnored?.(file)
-    return inside ? inside.flatMap(scanFile) : [unscanned(file)]
+    if (inside)
+      return inside.flatMap(scanFile)
+    unread.push(file)
+    return []
   })
-  return [...scan.findings, ...published, ...scan.unresolvedSources.map(unscanned)]
+  return [...scan.findings, ...published, ...unscanned([...unread, ...scan.unresolvedSources])]
 }
 
-function unscanned(source: string): Finding {
-  return { ruleId: 'unscanned-published-file', name: 'published file it could not scan', env: null, start: 0, end: 0, preview: source }
+function unscanned(sources: string[]): Finding[] {
+  const finding = (preview: string): Finding => ({ ruleId: 'unscanned-published-file', name: 'published file it could not scan', env: null, start: 0, end: 0, preview })
+  const shown = sources.slice(0, MAX_LISTED_UNSCANNED).map(finding)
+  return sources.length > MAX_LISTED_UNSCANNED ? [...shown, finding(`${sources.length - MAX_LISTED_UNSCANNED} more`)] : shown
 }
 
 function trimEnd(line: string): string {

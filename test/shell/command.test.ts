@@ -1,7 +1,7 @@
 import { basename } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { findSecretsInCommand, onlyWritesTo } from '../../src'
-import { MAX_COMMAND_LENGTH } from '../../src/shell/constants'
+import { MAX_COMMAND_CANDIDATES, MAX_COMMAND_LENGTH } from '../../src/shell/constants'
 import { fake, rand } from '../support/fake'
 
 const ids = (cmd: string): string[] => findSecretsInCommand(cmd).findings.map(f => f.ruleId)
@@ -306,6 +306,18 @@ describe('hostile command lines, in linear time', () => {
     within(2000, Array.from({ length: 10_000 }, (_, i) => `<<A${i}\n`).join('').slice(0, MAX_COMMAND_LENGTH))
   })
 
+  it('scans a long run of heredoc openers on one line', () => {
+    within(500, sized('<<A ', 'git commit -m x '))
+    within(500, sized('<<A ', 'git commit -m x ', '\n'))
+    within(500, sized('<<"A B" ', 'git commit -m x ', '\nA B\n'))
+  })
+
+  it('scans a long run of pipes into a shell, each of which is a script of its own', () => {
+    within(300, sized('echo \'echo hi\' | bash; '))
+    within(300, sized('echo \'echo $(x)\' | bash; echo $(y); '))
+    within(300, sized('bash -c \'echo $(date)\'; '))
+  })
+
   it('scans a long run of heredoc headers that a backslash or a quote carries over the newline', () => {
     within(500, sized('<<A \\\n'))
     within(500, sized('<<A \\\n', '', 'A\n'))
@@ -360,6 +372,34 @@ describe('hostile command lines, in linear time', () => {
     within(500, sized('$(a$(a$(a$(a$(a '))
     within(500, sized('x=$(git commit -F f);'))
     within(500, sized('git add -f $(ls) '))
+  })
+
+  it('scans long runs of double-quoted strings that hold substitutions', () => {
+    within(2000, sized('"$(a)" '))
+    within(2000, sized('"$(" '))
+    within(2000, sized('"`" '))
+    within(2000, sized('x="$(git commit -m "m" -F f)"; '))
+    within(2000, sized('x="$(cat <<\'EOF\'\nDon\'t\nEOF\n)"; '))
+    within(2000, sized('$(a ', '"', '"'))
+    within(2000, sized('$(a)', '"', '"'))
+    within(2000, sized('`a`', '"', '"'))
+    within(2000, `"$(${'x'.repeat(MAX_COMMAND_LENGTH - 10)}"`)
+    // A substitution that never closes is tried against the strings after it.
+    within(2000, sized('"$(a "b" "c" "d" "e" "f" "g" "h" "i" '))
+    within(2000, sized('"a$(b" "c$(d" '))
+    within(2000, `"$(${'"b" '.repeat(20_000)})"`)
+  })
+
+  it('blocks a line nested so deep that reading it would outlast the hook', () => {
+    // Every level repeats the text of the ones inside it.
+    const deep = 'a=$( '.repeat(15_000) + ')'.repeat(15_000)
+    within(500, deep)
+    expect(scan(deep).unresolved).not.toEqual([])
+    expect(onlyWritesTo(`echo ok > f ${deep}`, () => true)).toBe(false)
+    // A few levels in a long line are read as usual.
+    const nested = sized('x ', 'echo $(echo $(echo $(echo ', '))))')
+    within(500, nested)
+    expect(scan(nested)).toEqual({ files: [], unresolved: [] })
   })
 })
 
@@ -522,6 +562,42 @@ describe('publishers the shell hides behind quoting, wrappers and substitutions'
       expect(scan(cmd).unresolved, cmd).toEqual([])
   })
 
+  it('counts what the outer shell expanded into a script, inside single quotes of the script too', () => {
+    for (const cmd of [
+      `k=$(cat .env); bash -c "git commit -m '$k'"`,
+      `bash -c "git commit -m '$(cat .env)'"`,
+      `k=$(cat .env); eval "git commit -m '$k'"`,
+      `k=$(cat .env); bash <<EOF\ngit commit -m '$k'\nEOF`,
+      `k=$(cat .env); cat <<EOF | bash\ngit commit -m '$k'\nEOF`,
+      `k=$(cat .env); echo "git commit -m '$k'" | bash`,
+      `bash <<EOF\ngit commit -m '$(cat .env)'\nEOF`,
+      // The shell that reads a bare heredoc drops the backslash, so the script runs the substitution.
+      `bash <<EOF\nk=\\$(cat .env); git commit -m "\\$k"\nEOF`,
+    ])
+      expect(scan(cmd).unresolved, JSON.stringify(cmd)).not.toEqual([])
+    for (const cmd of [
+      `k=$(cat .env); bash -c 'git commit -m '\\''$k'\\'''`,
+      `bash -c 'git commit -m '\\''$(cat .env)'\\'''`,
+      `k=ok; bash -c "git commit -m '$k'"`,
+      `bash -c "git commit -m '$HOME'"`,
+      `bash -c "git commit -m '\\$(cat .env)'"`,
+      `bash <<'EOF'\ngit commit -m '$(cat .env)'\nEOF`,
+      `k=$(cat .env); cat <<'EOF' | bash\ngit commit -m '$k'\nEOF`,
+    ])
+      expect(scan(cmd), JSON.stringify(cmd)).toEqual({ files: [], unresolved: [] })
+  })
+
+  it('ends a heredoc on its delimiter however it is written, and on no other line', () => {
+    for (const opener of ['<<\\EOF', '<<"EOF"', '<<E"O"F', '<<-\'EOF\'', '<< EOF'])
+      expect(scan(`cat ${opener}\nit's\nEOF\ngit add -f .env\necho 'x'`).files, opener).toEqual(['.env'])
+    expect(scan(`cat <<'END OF'\nit's\nEND OF\ngit add -f .env\necho 'x'`).files).toEqual(['.env'])
+    expect(scan(`cat <<a-b\nit's\na-b\ngit add -f .env\necho 'x'`).files).toEqual(['.env'])
+    expect(scan(`cat <<-EOF\n\tit's\n\t\tEOF\ngit add -f .env\necho 'x'`).files).toEqual(['.env'])
+    // A carriage return or a blank after the word makes the line another one, as it does for bash.
+    expect(scan(`cat <<EOF\nit's\nEOF\r\ngit add -f .env\necho 'x'\nEOF`).files).toEqual([])
+    expect(scan(`cat <<EOF\nit's\nEOF \ngit add -f .env\necho 'x'\nEOF`).files).toEqual([])
+  })
+
   it('finds git or gh past a word that only names them', () => {
     for (const cmd of [
       'A=/git git commit -F .env',
@@ -533,7 +609,7 @@ describe('publishers the shell hides behind quoting, wrappers and substitutions'
   })
 
   it('blocks a command that stands past more words that may name it than are tried', () => {
-    const many = (word: string): string => Array.from({ length: 8 }, (_, k) => word.replace('#', String.fromCharCode(97 + k))).join(' ')
+    const many = (word: string): string => Array.from({ length: MAX_COMMAND_CANDIDATES }, (_, k) => word.replace('#', `n${k}`)).join(' ')
     for (const cmd of [
       `${many('$#')} git add -f .env`,
       `${many('#=/git')} git add -f .env`,
@@ -541,6 +617,16 @@ describe('publishers the shell hides behind quoting, wrappers and substitutions'
     ])
       expect(scan(cmd).unresolved, cmd).not.toEqual([])
     expect(scan(`printf '%s' ${many('"$#"')} "$z"`)).toEqual({ files: [], unresolved: [] })
+  })
+
+  it('does not block a line that names git, gh and shells a few times without running them', () => {
+    for (const cmd of [
+      'which git gh sh bash zsh dash ksh mksh ash',
+      'for s in sh bash zsh dash ksh mksh ash sh bash; do echo $s; done',
+      'echo $1 $2 $3 $4 $5 $6 $7 $8 $9',
+      'tar czf out.tgz $A $B $C $D $E $F $G $H $I',
+    ])
+      expect(scan(cmd), cmd).toEqual({ files: [], unresolved: [] })
   })
 
   it('does not take the name of an Object.prototype member for a git subcommand', () => {
@@ -619,6 +705,35 @@ describe('publishers the shell hides behind quoting, wrappers and substitutions'
     expect(scan('R=$(cat .env); gh pr comment 2 --body "$R"').unresolved).not.toEqual([])
   })
 
+  it('counts a flag gh is given before the last word of its subcommand', () => {
+    for (const cmd of [
+      'gh api -X POST -f body="$(cat .env)" repos/o/r/issues/1/comments',
+      'gh api repos/o/r/issues/1/comments -f body="$(cat .env)"',
+      'gh workflow run -f note="$(cat .env)" deploy.yml',
+      'gh pr -b "$(cat .env)" create',
+      'gh issue --body "$(cat .env)" create',
+      'gh -b "$(cat .env)" pr create',
+      'gh release -n "$(cat .env)" create v1',
+      'gh -R o/r pr -b "$(cat .env)" create',
+    ])
+      expect(scan(cmd).unresolved, cmd).not.toEqual([])
+    for (const cmd of [
+      'gh api -H "X-Run: $(cat run-id)" repos/o/r/actions/runs',
+      'gh api -X GET --jq "$(cat filter.jq)" repos/o/r/actions/runs',
+    ])
+      expect(scan(cmd), cmd).toEqual({ files: [], unresolved: [] })
+  })
+
+  it('does not count the repository gh is given before its subcommand', () => {
+    for (const cmd of [
+      'gh -R "$(git remote get-url origin)" pr create -F b.md',
+      'gh --repo "$(git remote get-url origin)" pr create -F b.md',
+      'gh --repo="$(git remote get-url origin)" pr create -F b.md',
+      'gh pr -R "$(git remote get-url origin)" create -F b.md',
+    ])
+      expect(scan(cmd), cmd).toEqual({ files: ['b.md'], unresolved: [] })
+  })
+
   it('blocks arguments built from stdin', () => {
     expect(scan('echo .env | xargs git add -f').unresolved).not.toEqual([])
     expect(scan('ls | parallel gh gist create').unresolved).not.toEqual([])
@@ -682,6 +797,13 @@ describe('words and commands as bash splits them', () => {
     expect(scan(`git commit -m $$$'it\\'s' -m ok`).unresolved).toEqual([])
   })
 
+  it('does not read a trailing comment as words of the command', () => {
+    expect(scan(`echo 'git add -f .env' | bash # stage it`).files).toEqual(['.env'])
+    expect(scan('git add -f plain.txt # force it').files).toEqual(['plain.txt'])
+    expect(scan('git commit -F msg.txt # see notes.md').files).toEqual(['msg.txt'])
+    expect(findSecretsInCommand('echo ok | tee a # b').redirectTargets).toEqual(['a'])
+  })
+
   it('opens a comment only after a space, a tab, a newline or an operator', () => {
     for (const blank of ['\r', ' '])
       expect(scan(`echo hi${blank}# x; git add -f .env`).files, JSON.stringify(blank)).toEqual(['.env'])
@@ -694,6 +816,8 @@ describe('words and commands as bash splits them', () => {
     expect(scan('echo $(:)# x; git add -f .env').files).toEqual(['.env'])
     expect(scan('echo "$(date)"# x; git add -f .env').files).toEqual(['.env'])
     expect(scan('(true)# x; git add -f .env').files).toEqual([])
+    // The `)` of a case pattern closes no substitution, so the `#` after it is a comment.
+    expect(scan(`x=$(case y in y)# it's\n;; esac); git add -f .env; echo 'x'`).files).toEqual(['.env'])
     expect(scan('(true) # x; git add -f .env').files).toEqual([])
   })
 
@@ -724,6 +848,25 @@ describe('words and commands as bash splits them', () => {
   it('counts a substitution that a line continuation splits after the dollar sign', () => {
     expect(scan('git commit -m "$\\\n(cat .env)"').unresolved).not.toEqual([])
     expect(scan('k=$\\\n(cat .env); git commit -m "$k"').unresolved).not.toEqual([])
+  })
+
+  it('counts a variable that a line continuation splits after the dollar sign', () => {
+    for (const cmd of [
+      'k=$(cat .env); git commit -m "$\\\nk"',
+      'k=$(cat .env); git commit -m $\\\nk',
+      'k=$(cat .env); git commit -m "$\\\n{k}"',
+      'k=$(cat .env); git commit -m $\\\n\\\nk',
+    ])
+      expect(scan(cmd).unresolved, JSON.stringify(cmd)).not.toEqual([])
+  })
+
+  it('counts the variable names zsh reads beyond the ones bash does', () => {
+    for (const cmd of [
+      'k=$(cat .env); git commit -m "$=k"',
+      'k=$(cat .env); git commit -m $~k',
+      'é=$(cat .env); git commit -m "$é"',
+    ])
+      expect(scan(cmd).unresolved, cmd).not.toEqual([])
   })
 
   it('decodes the escapes of an ANSI-C quoted word, as bash does', () => {
@@ -832,6 +975,27 @@ describe('words and commands as bash splits them', () => {
     expect(scan('gh -R $(git remote get-url origin) pr create -t x -b "$(cat .env)"').unresolved).not.toEqual([])
   })
 
+  it('counts the author or committer of a commit when a file fills them, whatever stands before the subcommand', () => {
+    for (const cmd of [
+      'git -c user.name="$(cat .env)" commit --allow-empty -m x',
+      'git -c user.email=`cat .env` commit --allow-empty -m x',
+      'git -c user.email=$(<.env) commit --allow-empty -m x',
+      'GIT_AUTHOR_NAME="$(cat .env)" git commit --allow-empty -m x',
+      'env GIT_COMMITTER_EMAIL="$(head -1 .env)" git commit --allow-empty -m x',
+      'export GIT_AUTHOR_NAME=$(cat .env); git commit --allow-empty -m x',
+      'export N=$(cat .env); git -c user.name="$N" commit --allow-empty -m x',
+      'read N < .env; git -c user.email=$N commit --allow-empty -m x',
+    ])
+      expect(scan(cmd).unresolved, cmd).not.toEqual([])
+    for (const cmd of [
+      'GIT_AUTHOR_NAME=$(whoami) git commit --allow-empty -m x',
+      'git -c user.name="$(git config user.name)" commit --allow-empty -m x',
+      'N=$(whoami); git -c user.name="$N" commit --allow-empty -m x',
+      'export GIT_AUTHOR_NAME=$(whoami); git commit --allow-empty -m x',
+    ])
+      expect(scan(cmd), cmd).toEqual({ files: [], unresolved: [] })
+  })
+
   it('reads a command in a substitution as its own, unaffected by the command around it', () => {
     expect(scan('out=$(git commit -F msg.txt 2>&1)')).toEqual({ files: ['msg.txt'], unresolved: [] })
     expect(scan('echo $(git commit -F msg.txt)')).toEqual({ files: ['msg.txt'], unresolved: [] })
@@ -839,6 +1003,118 @@ describe('words and commands as bash splits them', () => {
     expect(scan('echo $(git commit -F msg.txt) && cp .env msg.txt').files).toEqual(['msg.txt'])
     expect(scan('echo $(cp .env msg.txt) && git commit -F msg.txt').unresolved).toEqual(['msg.txt'])
     expect(scan('cp .env msg.txt && out=$(git commit -F msg.txt)').unresolved).toEqual(['msg.txt'])
+  })
+
+  it('reads a command in a substitution inside double quotes, which the shell runs all the same', () => {
+    for (const cmd of [
+      'echo "$(git add -f .env)"',
+      'x="$(git add -f .env)"',
+      'echo "a $(git add -f .env) b"',
+      'echo "`git add -f .env`"',
+      'echo "x" "$(git add -f .env)" "y"',
+      'echo "it\'s $(git add -f .env) and that\'s all"',
+      // A quoted word of its own ends the string early, before the parenthesis.
+      'x="$(git commit -m "msg" -F .env)"',
+      'out="$(gh pr create --title "t" --body-file .env)"',
+      'echo "$(git add -f .env"',
+      // Apostrophes in a heredoc body do not hide where the substitution closes.
+      'git commit -m "$(cat <<\'EOF\'\nDon\'t\nEOF\n)" -F .env',
+      // The quoted words end the string several times before the parenthesis.
+      'x="$(echo "a"; git add -f .env)"',
+      'x="$(echo "a" "b" "c" "d" "e" "f" "g"; git add -f .env)"',
+      'echo "$(echo "$(echo "$(git add -f .env)")")"',
+    ])
+      expect(scan(cmd).files, cmd).toContain('.env')
+    expect(scan('x="$(cd "$dir" && git add -f .env)"').unresolved).toEqual(['.env'])
+    expect(scan('x="$(git commit -F msg.txt 2>&1)"')).toEqual({ files: ['msg.txt'], unresolved: [] })
+    expect(scan('x="$(cat .env > msg)"; git commit -F msg').unresolved).toEqual(['msg'])
+    // A dollar sign that is escaped, or in single quotes, runs nothing.
+    for (const cmd of [
+      'echo "\\$(git add -f .env)"',
+      'echo \'"$(git add -f .env)"\'',
+      'echo "$(git status)" "(git add -f .env)"',
+      'git commit -m "$(cat <<\'EOF\'\nDon\'t crash\nEOF\n)"',
+    ])
+      expect(scan(cmd), cmd).toEqual({ files: [], unresolved: [] })
+  })
+
+  it('takes the stage before a command, not a command inside a substitution it holds', () => {
+    // The `echo` starts after the `cat` but ends before the `>` and the `|`.
+    expect(scan('cat .env $(echo x) > msg && git commit -F msg')).toEqual({ files: [], unresolved: ['msg'] })
+    expect(scan('cat $(echo .env) > msg; git commit -F msg').unresolved).toEqual(['msg'])
+    expect(scan('cat `echo .env` > msg; git commit -F msg').unresolved).toEqual(['msg'])
+    expect(scan('cat $(echo x) .env | git commit -F -').files).toContain('.env')
+    expect(scan('cat $(echo x) .env | gh pr create --title t --body-file -').files).toContain('.env')
+    expect(scan(`echo $(true) 'git add -f .env' | bash`).unresolved).toEqual(['.env'])
+    expect(scan('echo hi > msg && git commit -F msg')).toEqual({ files: [], unresolved: [] })
+  })
+
+  it('finds git behind a substitution nested deeper than a word can hold', () => {
+    const deep = '$(echo $(echo $(echo $(echo $(echo x)))))'
+    for (const cmd of [
+      `FOO=${deep} git add -f .env`,
+      `env FOO=${deep} git add -f .env`,
+      `sudo -u ${deep} git add -f .env`,
+      `git -c core.foo=${deep} add -f .env`,
+      `git add <(echo x) -f .env`,
+      `git add -f .env >(cat)`,
+    ])
+      expect(scan(cmd).files, cmd).toContain('.env')
+    expect(scan('echo x | tee >(cat) msg; git commit -F msg')).toEqual({ files: [], unresolved: [] })
+    expect(scan('cat .env | tee >(cat) msg; git commit -F msg').unresolved).toEqual(['msg'])
+  })
+
+  it('keeps a redirect that duplicates a descriptor in the command it belongs to', () => {
+    expect(scan('git add 2>&1 -f .env').files).toEqual(['.env'])
+    expect(scan('git add &>/dev/null -f .env').files).toEqual(['.env'])
+    expect(scan('git commit -m hi 2>&1 | cat')).toEqual({ files: [], unresolved: [] })
+    // A lone `&` still ends the command: it starts a background job.
+    expect(scan('git add -f x & cat .env').files).toEqual(['x'])
+  })
+
+  it('does not take what xargs prints for the words on the command line', () => {
+    expect(scan('xargs echo < .env | git commit -F -').unresolved).not.toEqual([])
+    expect(scan('xargs -I{} echo {} < .env | git commit -F -').unresolved).not.toEqual([])
+    expect(scan('xargs cat < list.txt | git commit -F -').unresolved).not.toEqual([])
+    expect(scan('cat .env | xargs echo > msg && git commit -F msg').unresolved).toEqual(['msg'])
+  })
+
+  it('places a file read from stdin like one named outright', () => {
+    expect(scan('git commit -F - < msg').files).toEqual(['msg'])
+    expect(scan('cp .env msg; git commit -F - < msg').unresolved).toEqual(['msg'])
+    expect(scan('cat .env > msg && cat msg | git commit -F -').unresolved).toEqual(['msg'])
+    expect(scan('cd sub && git commit -F - < msg').unresolved).toEqual(['msg'])
+    // `git -C` moves git, not the shell that opens the file.
+    expect(scan('git -C sub commit -F - < msg').files).toEqual(['msg'])
+  })
+
+  it('gives a script the stdin of the wrapper that runs it', () => {
+    expect(scan('watch git commit -F - < .env').files).toEqual(['.env'])
+    expect(scan('cat .env | watch git commit -F -').files).toEqual(['.env'])
+    expect(scan(`bash -c 'git commit -F -' < .env`).files).toEqual(['.env'])
+    expect(scan(`cat .env | bash -c 'git commit -F -'`).files).toEqual(['.env'])
+    expect(scan(`echo hello | bash -c 'git commit -F -'`)).toEqual({ files: [], unresolved: [] })
+    expect(scan(`bash -c 'git commit -F -' <<'EOF'\nhello\nEOF`)).toEqual({ files: [], unresolved: [] })
+  })
+
+  it('reads the body of a heredoc piped into a publisher, which the shell expands unless the delimiter is quoted', () => {
+    for (const cmd of [
+      'k=$(cat .env); cat <<EOF | git commit -F -\n$k\nEOF',
+      'cat <<EOF | git commit -F -\n$(cat .env)\nEOF',
+      'cat <<EOF | gh pr create --body-file -\n`cat .env`\nEOF',
+      'read k < .env; cat <<EOF | tee msg\n$k\nEOF\ngit commit -F msg',
+      'git commit -F - <<.EOF\n$(cat .env)\n.EOF',
+      'cat <<.EOF | git commit -F -\n$(cat .env)\n.EOF',
+    ])
+      expect(scan(cmd).unresolved, cmd).not.toEqual([])
+    for (const cmd of [
+      `cat <<'EOF' | git commit -F -\n$k\nEOF`,
+      'cat <<\\EOF | git commit -F -\n$(cat .env)\nEOF',
+      'cat <<EOF | git commit -F -\nfix: x\nEOF',
+      'git commit -F - <<"EOF"\n$(cat .env)\nEOF',
+      'git commit -F - <<\\EOF\n$(cat .env)\nEOF',
+    ])
+      expect(scan(cmd), cmd).toEqual({ files: [], unresolved: [] })
   })
 
   it('does not take a dollar sign inside single quotes for an expansion', () => {
@@ -858,7 +1134,7 @@ describe('words and commands as bash splits them', () => {
     expect(onlyWritesTo(`echo ${fake.github()} > .env 2>&1`, ignoredEnv)).toBe(true)
   })
 
-  it('reads the operands of a tee that a redirect with an ampersand splits off', () => {
+  it('reads the operands of a tee across a redirect with an ampersand', () => {
     expect(findSecretsInCommand('echo ok | tee a 2>&1 b').redirectTargets).toEqual(['a', 'b'])
     expect(findSecretsInCommand('echo ok | tee a &>/dev/null b').redirectTargets).toEqual(['a', 'b'])
     expect(findSecretsInCommand('echo ok | tee a & b').redirectTargets).toEqual(['a'])
@@ -867,11 +1143,6 @@ describe('words and commands as bash splits them', () => {
 })
 
 describe('shell code handed on to another program', () => {
-  const scan = (cmd: string): { files: string[], unresolved: string[] } => {
-    const { messageFiles, unresolvedSources } = findSecretsInCommand(cmd)
-    return { files: messageFiles, unresolved: unresolvedSources }
-  }
-
   it('reads the command string of env -S, su, runuser, script, watch and flock', () => {
     for (const cmd of [
       `env -S "git add -f .env"`,
@@ -920,6 +1191,68 @@ describe('shell code handed on to another program', () => {
       expect(scan(cmd).files.map(path => path.replace('/srv/', '')), JSON.stringify(cmd)).toEqual(['.env'])
     expect(scan(`echo "git commit -m $(cat .env)" | bash`).unresolved).not.toEqual([])
     expect(scan(`cat <<EOF | bash\ngit commit -m "$(cat .env)"\nEOF`).unresolved).not.toEqual([])
+  })
+
+  it('finds the printer however its name is spelled', () => {
+    for (const cmd of [
+      `\\echo 'git add -f .env' | bash`,
+      `'echo' 'git add -f .env' | bash`,
+      `e""cho 'git add -f .env' | bash`,
+      `"printf" '%s' 'git add -f .env' | sh`,
+      `/bin/echo 'git add -f .env' | bash`,
+      `\\cat <<'EOF' | bash\ngit add -f .env\nEOF`,
+      `'cat' <<'EOF' | bash\ngit add -f .env\nEOF`,
+      `cat <<< 'git add -f .env' | bash`,
+    ]) {
+      // A stage whose name is quoted is not known to print literally, so the
+      // file it names may count as one it wrote: unresolved, not read.
+      const { files, unresolved } = scan(cmd)
+      expect([...files, ...unresolved], JSON.stringify(cmd)).toContain('.env')
+    }
+  })
+
+  it('reads the escapes that printf and echo -e turn into characters', () => {
+    for (const cmd of [
+      `printf '\\x67it add -f .env' | bash`,
+      `printf '\\147it add -f .env' | bash`,
+      `printf '\\x67it\\x20add -f .env' | bash`,
+      `printf '%b' '\\x67it add -f .env' | bash`,
+      `printf 'git %s -f .env' add | bash`,
+      `echo -e '\\x67it add -f .env' | bash`,
+      `echo -e '\\0147it add -f .env' | bash`,
+    ])
+      expect(scan(cmd).files, cmd).toEqual(['.env'])
+  })
+
+  it('does not trip over a pipe whose left side has no printer', () => {
+    for (const cmd of [`FOO="a echo hi | bash`, `FOO=a\u00A0echo hi | bash`, `X=> echo | sh`])
+      expect(() => scan(cmd), cmd).not.toThrow()
+  })
+
+  it('finds the script after the options a shell takes a value for', () => {
+    for (const cmd of [
+      `bash -c -o pipefail 'git add -f .env'`,
+      `bash -c +x 'git add -f .env'`,
+      `bash -c +o history 'git add -f .env'`,
+      `bash -c -O extglob 'git add -f .env'`,
+      `sh -c -o errexit 'git add -f .env'`,
+      `bash -ec -o pipefail 'git add -f .env'`,
+      `zsh -c -o pipefail 'git add -f .env'`,
+      `bash -co pipefail 'git add -f .env'`,
+      `bash --rcfile rc -c 'git add -f .env'`,
+      `bash -c -- 'git add -f .env'`,
+      `echo 'git add -f .env' | bash -eo pipefail`,
+      `echo 'git add -f .env' | bash -o pipefail`,
+      `echo 'git add -f .env' | bash +e`,
+    ])
+      expect(scan(cmd).files, cmd).toEqual(['.env'])
+    for (const cmd of [
+      `bash -c -o pipefail 'git commit -m "fix: x"'`,
+      `echo 'git add -f .env' | bash -- deploy.sh`,
+      `echo 'git add -f .env' | bash -eo pipefail deploy.sh`,
+      `bash deploy.sh -c 'git add -f .env'`,
+    ])
+      expect(scan(cmd), cmd).toEqual({ files: [], unresolved: [] })
   })
 
   it('does not read a pipe into a shell that runs a script file, or a stage that prints unknown text', () => {
