@@ -1,1 +1,1 @@
-export const PATCH_FILE = /^\*\*\* (?:Add File|Update File|Move to): (.+)$/
+export const PATCH_FILE = /^\*\*\* (Add File|Update File|Move to): (.+)$/

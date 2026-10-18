@@ -137,4 +137,24 @@ describe('checkToolCall', () => {
     const patch = ['*** Update File: .env', '*** Move to: config.js', '@@', `+${fake.github()}`].join('\n')
     expect(ids({ kind: 'patch', patch }, env())).toEqual(['github-token'])
   })
+
+  it('reads an indented patch header as Codex does, and an indented line in an Update hunk as context', () => {
+    const token = fake.github()
+    for (const indent of ['  ', '\t']) {
+      const patch = ['*** Begin Patch', '*** Add File: .env', '+A=1', `${indent}*** Add File: config.js`, `+${token}`, '*** End Patch'].join('\n')
+      expect(ids({ kind: 'patch', patch }, env()), JSON.stringify(indent)).toEqual(['github-token'])
+    }
+    const context = ['*** Begin Patch', '*** Update File: config.js', '@@', '-a', ' *** Add File: .env', `+${token}`, '*** End Patch'].join('\n')
+    expect(ids({ kind: 'patch', patch: context }, env())).toEqual(['github-token'])
+    const afterEnd = ['*** Update File: config.js', '@@', '+a', '*** End of File', '@@', ' *** Add File: .env', `+${token}`].join('\n')
+    expect(ids({ kind: 'patch', patch: afterEnd }, env())).toEqual(['github-token'])
+  })
+
+  it('takes the patch path verbatim after the marker, as Codex writes it', () => {
+    const exact: GuardEnv = { ...env(), isIgnored: path => path === '.env' }
+    const spaced = ['*** Begin Patch', '*** Add File:  .env', `+${fake.github()}`, '*** End Patch'].join('\n')
+    expect(ids({ kind: 'patch', patch: spaced }, exact)).toEqual(['github-token'])
+    const trailing = ['*** Begin Patch', '*** Add File: .env  ', `+${fake.github()}`, '*** End Patch'].join('\n')
+    expect(ids({ kind: 'patch', patch: trailing }, exact)).toEqual([])
+  })
 })

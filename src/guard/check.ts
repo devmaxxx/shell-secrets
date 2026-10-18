@@ -69,27 +69,35 @@ function unscanned(source: string): Finding {
 // they land in the last file named, which a `Move to` line can change. Any
 // other `***` line ends the exemption, so a header this does not recognise
 // cannot carry an ignored file's exemption into the next file.
+//
+// Codex finds a header past blanks on either side of the line, except inside
+// an Update hunk, where a line that starts with a blank is context; the path
+// is whatever follows the marker, so `Add File:  .env` writes ` .env`.
 function checkPatch(patch: string, env: GuardEnv, options: ScanOptions): Finding[] {
   const findings: Finding[] = []
   let ignored = false
+  let updating = false
   let added: string[] = []
   const flush = (): void => {
     if (!ignored && added.length > 0)
       findings.push(...findSecrets(added.join('\n'), options))
     added = []
   }
-  for (const line of patch.split(/\r?\n/)) {
+  for (const raw of patch.split(/\r?\n/)) {
+    const line: string = updating ? raw.trimEnd() : raw.trim()
     const file = PATCH_FILE.exec(line)
     if (file) {
       flush()
-      ignored = env.isIgnored(file[1]!.trim())
+      ignored = env.isIgnored(file[2]!)
+      updating = file[1] !== 'Add File'
     }
-    else if (line.startsWith('+')) {
-      added.push(line.slice(1))
+    else if (raw.startsWith('+')) {
+      added.push(raw.slice(1))
     }
     else if (line.startsWith('*** ')) {
       flush()
       ignored = false
+      updating &&= line === '*** End of File'
     }
   }
   flush()
