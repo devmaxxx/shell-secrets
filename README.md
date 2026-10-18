@@ -146,7 +146,7 @@ echo '{"tool_name":"Bash","tool_input":{"command":"echo \"TOKEN=$TOKEN\" >> conf
 
 ### What passes
 
-A secret is let through when it only lands in a file git ignores and does not track, such as `.env`: `echo "TOKEN=..." >> .env` passes, `... >> .env; cp .env config.js` does not, and neither does a write to an ignored name that is a symbolic or hard link. The files `git commit -F` and `gh --body-file` publish are scanned too, including one fed to `-F -` through `<` or `cat file |`, and so is a file `git add -f` forces past `.gitignore`; one the hook cannot read blocks the call, and so does one it cannot pin down, such as a message file filled by `cat .env >`. A forced add of a directory scans the ignored files in it. So does a tool call the hook cannot parse.
+A secret is let through when it only lands in a file git ignores and does not track, such as `.env`: `echo "TOKEN=..." >> .env` passes, `... >> .env; cp .env config.js` does not, and neither does a write to an ignored name that is a symbolic or hard link. The files `git commit -F`, `gh --body-file` and `gh variable set` publish are scanned too, including one fed to `-F -` through `<` or `cat file |`, and so is a file `git add -f` forces past `.gitignore`; one the hook cannot read blocks the call, as do one it cannot pin down, such as a message file filled by `cat .env >`, and a tool call the hook cannot parse. A forced add of a directory scans the ignored files in it. Shell code the command hands on is read the same way: code run by `bash -c`, `eval`, `su -c`, `env -S`, `watch` or a heredoc, and literal text an `echo`, `printf` or `cat <<EOF` pipes into a shell. A git or gh named through a variable or substitution (`$(which git) add -f .env`) is read as git or gh, and a subcommand filled in that way (`git $(…) -f .env`) blocks the call. `gh secret set NAME < .env` passes: a secret is where that value belongs.
 
 ### A hook of your own
 
@@ -262,7 +262,7 @@ Scans a shell command line and returns a `CommandScan`:
 interface CommandScan {
   findings: CommandFinding[] // Finding plus `variable` when the secret is assigned (NAME=secret)
   redirectTargets: string[] // files written through >, >> or tee, unexpanded
-  messageFiles: string[] // files git or gh publish verbatim (commit -F, --body-file, a stdin source, add -f, gh uploads)
+  messageFiles: string[] // files git or gh publish verbatim (commit -F, --body-file, a stdin source, add -f, gh uploads and variables)
   unresolvedSources: string[] // what it publishes that no file name pins down; treat as unscanned
 }
 ```
@@ -275,7 +275,7 @@ findSecretsInCommand(`export GITHUB_TOKEN=${token} && git commit -F msg.txt > ou
 //   unresolvedSources: [] }
 ```
 
-The scanner cannot read `messageFiles`; pass their contents to `findSecrets` yourself. A file the command first writes from literal text (`echo`, `printf`, a heredoc that does not expand, a `tee` fed by one) is left out, since that text is already in the command; one that any other command names first, such as `cp .env msg`, is unresolved, since what is on disk now is not what gets published. `git add -f -A` lists `.`, and a forced add can name a directory: give `checkToolCall` a `listIgnored` in its `GuardEnv` to scan the ignored files under it, which the hook does through `git ls-files` up to 2000 files. `gh gist create`, `gh release create` / `upload` assets, `gh api --input` and `gh api -F key=@file` are read as published files too. The command is found by name however it is quoted or wrapped (`'git'`, `\git`, `nice`, `timeout`), and shell code run through `bash -c`, `eval` or a heredoc fed to a shell is read the same way. `unresolvedSources` holds what it cannot pin to a file: `git add --pathspec-from-file`, a `--body-file -` fed by a stage other than `cat`, `head` or `tail`, a relative path after `cd` or under `git -C`, a file the command fills any other way, arguments built by `xargs`, a message built by a command or process substitution (`-m "$(cat .env)"`, `-F <(…)`) other than a literal `$(cat <<'EOF' … EOF)` or `$(echo …)`, and a command over 100,000 characters.
+The scanner cannot read `messageFiles`; pass their contents to `findSecrets` yourself. A file the command first writes from literal text (`echo`, `printf`, a heredoc that does not expand, a `tee` fed by one) is left out, since that text is already in the command; one that any other command names first, such as `cp .env msg`, is unresolved, since what is on disk now is not what gets published. `git add -f -A` lists `.`, and a forced add can name a directory: give `checkToolCall` a `listIgnored` in its `GuardEnv` to scan the ignored files under it, which the hook does through `git ls-files` up to 2000 files. `gh gist create`, `gh release create` / `upload` assets, `gh api --input`, `gh api` and `gh workflow run -F key=@file`, and the env file or stdin `gh variable set` stores are read as published files too. The command is found by name however it is quoted or wrapped (`'git'`, `\git`, `nice`, `timeout`); a name the shell fills in (`$g`, `$(which git)`) is read as git or gh, whichever its arguments would make publish. Shell code run through `bash -c`, `eval`, a heredoc, `su -c`, `script -c`, `flock -c`, `env -S` or `watch`, or piped into a shell by a literal `echo`, `printf` or `cat <<EOF`, is read the same way. `unresolvedSources` holds what it cannot pin to a file: `git add --pathspec-from-file`, a `--body-file -` fed by a stage other than `cat`, `head` or `tail`, a relative path after `cd`, `su -` or under `git -C`, a file the command fills any other way, arguments built by `xargs`, a git or gh subcommand the shell fills in (`git $(echo add)`), text built by a command or process substitution (`-m "$(cat .env)"`, `-F <(…)`, a substitution passed to a function defined on the line) other than a literal `$(cat <<'EOF' … EOF)` or `$(echo …)`, and a command over 100,000 characters.
 
 ### `onlyWritesTo(cmd, accept)`
 
@@ -385,13 +385,18 @@ The string scanners above cover far more providers than shell-secrets: @sanity-l
 
 ## Limits
 
-- A secret with no recognisable shape is found only under a secret-sounding name, and only when it looks random: a human-chosen `password = "summer2024"` is not reported.
+- A secret with no recognisable shape is found only under a secret-sounding name, and only when it looks random: a human-chosen `password = "summer2024"` is not reported. Names are matched without regard to case, so `pass` counts only as a word of its own: `DB_PASS` and `smtp.pass` are secret names, a camelCase `dbPass` is not.
 - 39 rules, not hundreds. Add your own for the services you use.
+- A provider token with a letter, digit, `_` or `-` right before its prefix (`x-ghp_…`) is not reported by its provider's rule, which keeps a prefix inside a longer identifier from matching. Under a secret-sounding name the generic rule may still report it.
+- `findNewSecrets` drops a finding only when its exact text is in `before`, so a secret that `before` held base64-encoded and `after` holds decoded is reported as new: the edit writes it where anyone can read it.
 - No git history scanning; the CLI only installs and runs the agent hook.
 - macOS and Linux only: the hook command runs through a POSIX shell.
 - Shell parsing is best effort. A command it cannot read is not treated as a plain write, which is the stricter answer.
+- The `.env` exemption is narrow on purpose. Only a lone `echo`, `printf` or `cat` writing through `>`, `>>` or `tee` qualifies, so a write to an ignored file is still blocked when it is chained (`cd app && echo … >> .env`), built with a substitution, piped through anything but `tee`, or aimed at a path holding `~`, `$` or a glob.
+- A descriptor duplicated with `>&3` is not followed to its file. `echo … > .env >&3` is read as a write to `.env`, though bash sends the output to whatever an earlier `exec 3>file` opened.
 - Plain `git add` and `git commit -a` are not scanned: they stage files git already tracks or does not ignore, which a write to them was checked against when it was made. Scan the staged diff with the [pre-commit recipe](#pre-commit-check-on-the-staged-diff) to cover them.
-- A script run from a file or a pipe (`bash deploy.sh`, `curl … | bash`, `python publish.py`) runs code the command line does not show, and a variable set outside the command (`-m "$TOKEN"` with `TOKEN` from the agent's environment) expands to a value the hook never sees; neither is followed.
+- Code the command line does not show is not followed: a script run from a file or piped from one or from a download (`bash deploy.sh`, `bash < deploy.sh`, `curl … | bash`), code in another language (`python publish.py`, `node -e "…"`), and a function, shell alias, git alias or variable defined outside the command, in an earlier call, a startup file, git config or the agent's environment (`-m "$TOKEN"`). A command kept in a variable and run by expanding it (`c='git add -f .env'; $c`) is not followed either, nor is an alias defined on the line, which zsh, or bash with `expand_aliases`, would expand.
+- Of gh, only the calls that publish text or files are read: `pr`, `issue`, `release`, `gist`, `api`, `variable set`, `workflow run`, `label` and `repo` create and edit, and `project` create, edit, item-create and item-edit. An extension or `gh codespace cp` is not. `gh secret set` is left alone on purpose, since a secret store is where a secret belongs.
 
 ## Contributing
 
