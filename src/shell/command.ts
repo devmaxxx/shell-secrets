@@ -2,9 +2,9 @@ import type { CommandFinding, CommandScan, ScanOptions } from '../types'
 import type { Segment } from './parse'
 import type { Publication } from './publish'
 import { findSecrets } from '../scan/find'
-import { ASSIGNMENT_BEFORE, ASSIGNMENT_LOOKBEHIND, CHANGES_DIRECTORY, DEFINES_FUNCTION, EXPANDED_INLINE_INPUT, EXPANDS_VARIABLE, FILE_READER, HARMLESS_DEVICE, HEREDOC_INTO_CAT, INPUT_REDIRECT, LINE_COUNT, LITERAL_STDIN, MAX_COMMAND_LENGTH, MAX_SCRIPT_DEPTH, READS_INTO_VARIABLE, REDIRECT, REDIRECT_OPERATOR, TEE } from './constants'
+import { ASSIGNMENT_BEFORE, ASSIGNMENT_LOOKBEHIND, CHANGES_DIRECTORY, DEFINES_FUNCTION, EXPANDED_INLINE_INPUT, EXPANDS_VARIABLE, FILE_READER, HARMLESS_DEVICE, HARMLESS_REDIRECT, HEREDOC_INTO_CAT, INPUT_REDIRECT, LINE_COUNT, LITERAL_STDIN, MAX_COMMAND_LENGTH, MAX_SCRIPT_DEPTH, READS_INTO_VARIABLE, REDIRECT, REDIRECT_OPERATOR, TEE } from './constants'
 import { hasSubstitution, scrubShell, segments, skipBlanks, unquote, wordAt } from './parse'
-import { hasOpaqueSubstitution, printedText, publicationOf } from './publish'
+import { opaqueSubstitutionAt, printedText, publicationOf } from './publish'
 
 interface Target { readonly at: number, readonly path: string }
 
@@ -20,16 +20,36 @@ function writeTargets(cmd: string, scrubbed: string): Target[] {
     const at = m.index + m[0].length
     targets.push({ at, path: unquote(wordAt(cmd, at)) })
   }
-  for (const { start, text } of segments(scrubbed)) {
-    const tee = TEE.exec(text)
+  const all = segments(scrubbed)
+  const byStart = new Map(all.map(segment => [segment.start, segment]))
+  // `2>&1` and `&>f` split the line at their `&`, but the command goes on.
+  const commandEnd = (segment: Segment): number => {
+    let end = segment.start + segment.text.length
+    while (scrubbed[end] === '&' && (/[<>]/.test(scrubbed[end - 1]!) || scrubbed[end + 1] === '>')) {
+      const next = byStart.get(end + 1)
+      if (!next) {
+        break
+      }
+      end = next.start + next.text.length
+    }
+    return end
+  }
+  for (const segment of all) {
+    const tee = TEE.exec(segment.text)
     if (!tee) {
       continue
     }
-    let at = start + tee[0].length
+    let at = segment.start + tee[0].length
     let options = true
+    // A word is read up to here: a backquote that closes the substitution this
+    // command is in would otherwise open a span that runs into the next one.
+    const end = commandEnd(segment)
     for (;;) {
       at = skipBlanks(cmd, at)
-      const word = wordAt(cmd, at)
+      if (at >= end) {
+        break
+      }
+      const word = wordAt(cmd, at, end)
       if (!word) {
         // A redirect among the operands names no tee target; skip it and read on.
         REDIRECT_OPERATOR.lastIndex = at
@@ -38,7 +58,7 @@ function writeTargets(cmd: string, scrubbed: string): Target[] {
           break
         }
         at = skipBlanks(cmd, at + operator[0].length)
-        at += wordAt(cmd, at).length
+        at += wordAt(cmd, at, end).length
       }
       else if (/^\d+$/.test(word) && /[<>]/.test(cmd[at + word.length] ?? '')) {
         at += word.length
@@ -71,7 +91,7 @@ function isLoneWrite(cmd: string, scrubbed: string): boolean {
   }
   // `>|` is a redirect that overrides noclobber, not a pipe.
   const line = scrubbed
-    .replace(/\d?>&\d(?![\w-])|\d>\s*\/dev\/null(?![^\s|<>])/g, '')
+    .replace(HARMLESS_REDIRECT, '')
     .replace(/>\|/g, '> ')
     .trim()
   if (/[;&`\n]|\d>|[<>]\(/.test(line)) {
@@ -103,7 +123,7 @@ function operands(cmd: string, at: number, end: number): string[] {
   const words: string[] = []
   let options = true
   for (let i = skipBlanks(cmd, at); i < end; i = skipBlanks(cmd, i)) {
-    const word = wordAt(cmd, i)
+    const word = wordAt(cmd, i, end)
     if (!word)
       break
     if (options && word === '--')
@@ -117,7 +137,7 @@ function operands(cmd: string, at: number, end: number): string[] {
 
 function inputRedirects(cmd: string, segment: Segment): string[] {
   return [...segment.text.matchAll(INPUT_REDIRECT)]
-    .map(m => unquote(wordAt(cmd, segment.start + m.index + m[0].length)))
+    .map(m => unquote(wordAt(cmd, segment.start + m.index + m[0].length, segment.start + segment.text.length)))
 }
 
 // `--body-file -` reads stdin. A heredoc, a here-string or an echo puts the
@@ -195,11 +215,12 @@ const normalise = (path: string): string => path.replace(/^(?:\.\/)+/, '')
  * Shell code run through `bash -c`, `eval`, a heredoc or a runner such as
  * `su -c`, `env -S` or `watch` is read the same way.
  */
-function messageFiles(cmd: string, scrubbed: string, depth = 0): Published {
+function messageFiles(cmd: string, scrubbed: string, depth = 0, tainted = false): Published {
   const all = segments(scrubbed).filter(segment => segment.text.trim() !== '')
   const found = all.map(segment => publicationOf(cmd, scrubbed, segment))
   const writes = writeTargets(cmd, scrubbed)
   const published = publishes()
+  const hidden = hiddenContent(cmd, scrubbed, tainted)
   // `cp .env msg && git commit -F msg`, `dd of=msg` or a script that writes
   // 'msg': a command that mentions the file can change it, so neither the
   // disk's bytes nor an earlier literal write are what gets published. A
@@ -210,7 +231,8 @@ function messageFiles(cmd: string, scrubbed: string, depth = 0): Published {
     changers ??= all.map((segment, i) => found[i]!.publishes || FILE_READER.test(segment.text) || TEE.test(segment.text) || isLiteralStage(cmd, scrubbed, segment, all) ? null : textOf(cmd, segment))
     const name = normalise(path).split('/').filter(Boolean).at(-1) ?? path
     for (let i = 0; i < index; i++) {
-      if (changers[i]?.includes(name))
+      // A command that holds this one in a substitution has not run yet.
+      if (all[i]!.start + all[i]!.text.length <= all[index]!.start && changers[i]?.includes(name))
         return true
     }
     return false
@@ -235,11 +257,12 @@ function messageFiles(cmd: string, scrubbed: string, depth = 0): Published {
         published.files.push(path)
     }
     for (const script of [...publication.scripts, ...pipedScript(cmd, scrubbed, all, index, publication)]) {
-      const inner = depth < MAX_SCRIPT_DEPTH ? messageFiles(script, scrubShell(script), depth + 1) : publishes([], [script.trim()])
+      // The script's own text cannot show what a variable it reads was set to.
+      const inner = depth < MAX_SCRIPT_DEPTH ? messageFiles(script, scrubShell(script), depth + 1, hidden.passedBy(segment)) : publishes([], [script.trim()])
       published.unresolved.push(...inner.unresolved)
       inner.files.forEach(path => place(path, moved || publication.elsewhere))
     }
-    if (publication.content && hasHiddenContent(cmd, scrubbed, segment))
+    if (publication.content && hidden.readBy(segment, publication.from))
       published.unresolved.push(text.trim())
     for (const path of publication.files) {
       if (path === '-') {
@@ -255,17 +278,52 @@ function messageFiles(cmd: string, scrubbed: string, depth = 0): Published {
   return published
 }
 
+interface HiddenContent {
+  /** The segment publishes text, from `from` on, from a substitution or a variable that one filled. */
+  readonly readBy: (segment: Segment, from: number) => boolean
+  /** A script the segment runs may read a variable that one filled. */
+  readonly passedBy: (segment: Segment) => boolean
+}
+
 // `git commit -m "$(cat .env)"` publishes the substitution's output, and
-// `k=$(cat .env); git commit -m "$k"` the variable it fills. A function body
-// runs when it is called, so on a line that defines one, `f "$(cat .env)"`
-// after the body fills its `$1` all the same.
-function hasHiddenContent(cmd: string, scrubbed: string, segment: Segment): boolean {
-  if (hasOpaqueSubstitution(cmd, segment.start))
-    return true
-  const own = cmd.slice(segment.start, segment.start + segment.text.length)
-  const filledUntil = DEFINES_FUNCTION.test(scrubbed) ? cmd.length : segment.start
-  return EXPANDS_VARIABLE.test(own)
-    && (hasOpaqueSubstitution(cmd, 0, filledUntil) || READS_INTO_VARIABLE.test(scrubbed.slice(0, filledUntil)))
+// `k=$(cat .env); git commit -m "$k"` the variable it fills. What the answers
+// rest on is found once, however many segments ask: a long line of `git tag $1;`
+// would otherwise rescan everything before each of them. `tainted` carries the
+// same suspicion into a script, which cannot see the text it was run from.
+// A function body runs when it is called, so on a line that defines one,
+// `f "$(cat .env)"` after the body fills its `$1` all the same.
+function hiddenContent(cmd: string, scrubbed: string, tainted: boolean): HiddenContent {
+  let code: string | undefined
+  let expanding: string | undefined
+  let firstSubstitution: number | undefined
+  let firstRead: number | undefined
+  const definesFunction = DEFINES_FUNCTION.test(scrubbed)
+  // Comments and heredoc bodies are blanked: an apostrophe in one is no quote.
+  const codeOf = (): string => code ??= scrubShell(cmd, 'quotes')
+  // Single quotes and escapes too: `'costs $5'` expands nothing.
+  const expandingOf = (): string => expanding ??= scrubShell(cmd, 'double')
+  // Up to the segment's end, which is where a backquote that closes the command's own substitution stands.
+  const substitutes = (segment: Segment, from = segment.start): boolean => opaqueSubstitutionAt(cmd, codeOf(), from, segment.start + segment.text.length) >= 0
+  const filledBefore = (offset: number): boolean => {
+    if (tainted) {
+      return true
+    }
+    const until = definesFunction ? cmd.length : offset
+    firstSubstitution ??= opaqueSubstitutionAt(cmd, codeOf(), 0, cmd.length)
+    if (firstSubstitution >= 0 && firstSubstitution < until) {
+      return true
+    }
+    if (firstRead === undefined) {
+      const read = READS_INTO_VARIABLE.exec(scrubbed)
+      firstRead = read ? read.index + read[0].length : Number.POSITIVE_INFINITY
+    }
+    return firstRead <= until
+  }
+  return {
+    readBy: (segment, from) => substitutes(segment, from)
+      || (EXPANDS_VARIABLE.test(expandingOf().slice(from, segment.start + segment.text.length)) && filledBefore(segment.start)),
+    passedBy: segment => substitutes(segment) || filledBefore(segment.start),
+  }
 }
 
 function isLiteralWrite(cmd: string, scrubbed: string, all: readonly Segment[], target: Target): boolean {
@@ -304,8 +362,9 @@ export function findSecretsInCommand(cmd: string, options: ScanOptions = {}): Co
   return {
     findings,
     redirectTargets: writeTargets(cmd, scrubbed).map(t => t.path).filter(path => path !== ''),
-    messageFiles: published.files,
-    unresolvedSources: published.unresolved,
+    // A command can name one file many times; each caller would read it that often.
+    messageFiles: [...new Set(published.files)],
+    unresolvedSources: [...new Set(published.unresolved)],
   }
 }
 
@@ -327,5 +386,7 @@ export function onlyWritesTo(cmd: string, accept: (path: string) => boolean): bo
     return false
   }
   const targets = writeTargets(cmd, scrubbed)
-  return targets.length > 0 && targets.every(t => isLiteralPath(t.path) && accept(t.path))
+  // A caller's policy may cost a process per path, and a command can repeat one.
+  const paths = new Set(targets.map(t => t.path))
+  return paths.size > 0 && [...paths].every(path => isLiteralPath(path) && accept(path))
 }

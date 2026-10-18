@@ -160,6 +160,89 @@ describe('checkToolCall', () => {
     expect(ids({ kind: 'patch', patch: afterEnd }, env())).toEqual(['github-token'])
   })
 
+  it('trims a patch line as Rust does, so a header Codex finds is one here too', () => {
+    const token = fake.github()
+    const exact: GuardEnv = { ...env(), isIgnored: path => path === '.env' }
+    const nel = ['*** Begin Patch', '*** Add File: .env', '+A=1', '\u0085*** Add File: config.js', `+${token}`, '*** End Patch'].join('\n')
+    expect(ids({ kind: 'patch', patch: nel }, exact)).toEqual(['github-token'])
+    const bom = ['*** Begin Patch', '*** Add File: .env\uFEFF', `+${token}`, '*** End Patch'].join('\n')
+    expect(ids({ kind: 'patch', patch: bom }, exact)).toEqual(['github-token'])
+    const lead = ['*** Begin Patch', '*** Add File: .env', '+A=1', '\uFEFF*** Add File: config.js', `+${token}`, '*** End Patch'].join('\n')
+    expect(ids({ kind: 'patch', patch: lead }, exact)).toEqual([])
+  })
+
+  describe('asking the file system', () => {
+    function counting(): { env: GuardEnv, asked: string[] } {
+      const asked: string[] = []
+      return {
+        asked,
+        env: {
+          isIgnored: (path) => {
+            asked.push(`ignored ${path}`)
+            return path.startsWith('.env')
+          },
+          readFile: () => null,
+          listIgnored: (path) => {
+            asked.push(`list ${path}`)
+            return null
+          },
+        },
+      }
+    }
+    const patchOf = (names: string[], line: string): string =>
+      ['*** Begin Patch', ...names.flatMap(name => [`*** Add File: ${name}`, `+${line}`]), '*** End Patch'].join('\n')
+
+    it('asks only about a path that would take a secret, and once', () => {
+      const { env, asked } = counting()
+      const same = Array.from<string>({ length: 20 }).fill('.env')
+      expect(checkToolCall({ kind: 'patch', patch: patchOf(same, 'A=1') }, env)).toEqual([])
+      expect(checkToolCall({ kind: 'write', path: 'a.js', content: 'A=1' }, env)).toEqual([])
+      expect(asked).toEqual([])
+      expect(checkToolCall({ kind: 'patch', patch: patchOf(same, fake.github()) }, env)).toEqual([])
+      expect(asked).toEqual(['ignored .env'])
+    })
+
+    it('asks once for a redirect target a command names over and over', () => {
+      const { env, asked } = counting()
+      const command = `echo ${fake.github()}${' >> .env'.repeat(50)}`
+      expect(checkToolCall({ kind: 'shell', command }, env)).toEqual([])
+      expect(asked).toEqual(['ignored .env'])
+    })
+
+    it('blocks a call that names more paths than the hook can ask about in its time', () => {
+      const names = Array.from({ length: 200 }, (_, n) => `.env${n}`)
+      const { env, asked } = counting()
+      expect(ids({ kind: 'patch', patch: patchOf(names, fake.github()) }, env)).toHaveLength(168)
+      expect(asked).toHaveLength(32)
+      const shell = counting()
+      const command = `echo ${fake.github()} ${names.map(name => `> ${name}`).join(' ')}`
+      expect(ids({ kind: 'shell', command }, shell.env)).toEqual(['github-token'])
+      expect(shell.asked).toHaveLength(32)
+    })
+
+    it('lists a directory once, and not past the limit', () => {
+      const { env, asked } = counting()
+      checkToolCall({ kind: 'shell', command: 'git add -f dir; git add -f dir ./dir' }, env)
+      expect(asked).toEqual(['list dir', 'list ./dir'])
+      const dirs = Array.from({ length: 100 }, (_, n) => `d${n}`)
+      const many = counting()
+      expect(ids({ kind: 'shell', command: `git add -f ${dirs.join(' ')}` }, many.env)).toHaveLength(100)
+      expect(many.asked).toHaveLength(32)
+    })
+  })
+
+  it('keeps a line separator or a lone carriage return in a patch path, as Codex does', () => {
+    const exact: GuardEnv = { ...env(), isIgnored: path => path === '.env' }
+    const token = fake.github()
+    for (const path of ['a\u2028b', 'a\u2029b', 'a\rb']) {
+      // The line after the header is context, not a header for .env.
+      const update = ['*** Begin Patch', `*** Update File: ${path}`, '@@', ' *** Add File: .env', `+${token}`, '*** End Patch'].join('\n')
+      expect(ids({ kind: 'patch', patch: update }, exact), JSON.stringify(path)).toEqual(['github-token'])
+      const move = ['*** Begin Patch', '*** Update File: a.js', `*** Move to: ${path}`, '@@', ' *** Add File: .env', `+${token}`, '*** End Patch'].join('\n')
+      expect(ids({ kind: 'patch', patch: move }, exact), JSON.stringify(path)).toEqual(['github-token'])
+    }
+  })
+
   it('takes the patch path verbatim after the marker, as Codex writes it', () => {
     const exact: GuardEnv = { ...env(), isIgnored: path => path === '.env' }
     const spaced = ['*** Begin Patch', '*** Add File:  .env', `+${fake.github()}`, '*** End Patch'].join('\n')

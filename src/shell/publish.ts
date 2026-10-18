@@ -1,6 +1,6 @@
 import type { Heredoc, Segment } from './parse'
-import { ANSI_C_STRING, ARGUMENTS_FROM_STDIN, CAT_HEREDOC, CLOSING_PAREN, COMMAND_RUNNERS, ENV_VALUED_OPTION, FIELD_FROM_FILE, GH_GRAMMARS, GH_WRITES, GIT_GRAMMARS, GIT_PLACE_OPTION, GIT_VALUED_GLOBAL, HEREDOC_INTO_CAT, LITERAL_ECHO, LITERAL_STDIN, LOGIN_OPTION, REDIRECT_OPERATOR, RUNNER_COMMAND_OPTION, SHELL_COMMAND_OPTION, SHELL_STDIN_OPTION, SHELL_VALUED_OPTION, SHELLS, SPLIT_STRING_OPTION, WATCH_VALUED_OPTION } from './constants'
-import { heredocAt, skipBlanks, unquote, wordAt } from './parse'
+import { ANSI_C_STRING, ARGUMENTS_FROM_STDIN, CAT_HEREDOC, CLOSING_PAREN, COMMAND_RUNNERS, ENV_VALUED_OPTION, FIELD_FROM_FILE, GH_ALIASES, GH_GRAMMARS, GH_WRITES, GIT_GRAMMARS, GIT_PLACE_OPTION, GIT_VALUED_GLOBAL, HEREDOC_INTO_CAT, LEADING_EXPANSIONS, LITERAL_ECHO, LITERAL_STDIN, LOGIN_OPTION, MAX_COMMAND_CANDIDATES, REDIRECT_OPERATOR, RUNNER_COMMAND_OPTION, SHELL_COMMAND_OPTION, SHELL_STDIN_OPTION, SHELL_VALUED_OPTION, SHELLS, SPLIT_STRING_OPTION, WATCH_VALUED_OPTION } from './constants'
+import { afterContinuations, heredocAt, skipBlanks, unquote, wordAt } from './parse'
 
 type LongOption = readonly [name: string, shortestPrefix: number, valued: boolean]
 
@@ -27,9 +27,11 @@ export interface Publication {
   readonly elsewhere: boolean
   /** It is a shell that reads its script from stdin. */
   readonly stdinScript: boolean
+  /** Where its arguments start, after the subcommand: a substitution before it, as in `git -C $(pwd)`, adds no content. */
+  readonly from: number
 }
 
-interface Word { readonly value: string, readonly at: number }
+interface Word { readonly value: string, readonly at: number, readonly end: number }
 
 interface Option { readonly name: string, readonly value: string | undefined, readonly valued: boolean }
 
@@ -37,9 +39,15 @@ interface Parsed { readonly options: Option[], readonly operands: string[] }
 
 const COMMANDS = new Set(['git', 'gh', 'eval', ...SHELLS])
 
-const NOTHING: Publication = Object.freeze({ publishes: false, content: false, files: [], unresolved: [], scripts: [], elsewhere: false, stdinScript: false })
+const NOTHING: Publication = Object.freeze({ publishes: false, content: false, files: [], unresolved: [], scripts: [], elsewhere: false, stdinScript: false, from: 0 })
 
-const nameOf = (word: Word): string => word.value.slice(word.value.lastIndexOf('/') + 1)
+// The command a word names, past the expansions glued before it: `${X}git`
+// runs git when X is empty.
+function nameOf(cmd: string, word: Word): string {
+  const raw = cmd.slice(word.at, word.end)
+  const name = unquote(raw.slice(LEADING_EXPANSIONS.exec(raw)?.[0].length ?? 0))
+  return name.slice(name.lastIndexOf('/') + 1)
+}
 
 const isFilledIn = (word: string): boolean => /[$`]/.test(word)
 
@@ -56,9 +64,9 @@ function wordsOf(cmd: string, segment: Segment): { words: Word[], heredocs: numb
   const hereStrings: string[] = []
   let at = skipBlanks(cmd, segment.start)
   while (at < end) {
-    const raw = wordAt(cmd, at)
+    const raw = wordAt(cmd, at, end)
     if (raw && !(/^\d+$/.test(raw) && /[<>]/.test(cmd[at + raw.length] ?? ''))) {
-      words.push({ value: unquote(raw), at })
+      words.push({ value: unquote(raw), at, end: at + raw.length })
       at = skipBlanks(cmd, at + raw.length)
       continue
     }
@@ -72,8 +80,8 @@ function wordsOf(cmd: string, segment: Segment): { words: Word[], heredocs: numb
       heredocs.push(at)
     at = skipBlanks(cmd, at)
     if (operator[0] === '<<<')
-      hereStrings.push(unquote(wordAt(cmd, at)))
-    at = skipBlanks(cmd, at + wordAt(cmd, at).length)
+      hereStrings.push(unquote(wordAt(cmd, at, end)))
+    at = skipBlanks(cmd, at + wordAt(cmd, at, end).length)
   }
   return { words, heredocs, hereStrings }
 }
@@ -148,11 +156,12 @@ function git(words: readonly Word[], fromStdin: boolean, text: string, guessed =
     return guessed ? NOTHING : { ...NOTHING, publishes: true, unresolved: [text] }
   if (sub === 'fast-import')
     return { ...NOTHING, publishes: true, unresolved: [text] }
-  const grammar = GIT_GRAMMARS[sub]
+  // `constructor` and the like are no subcommands, and no grammar either.
+  const grammar = Object.hasOwn(GIT_GRAMMARS, sub) ? GIT_GRAMMARS[sub] : undefined
   if (!grammar)
     return NOTHING
   const parsed = parse(words.slice(j + 1), grammar)
-  const publication: Publication = { ...NOTHING, publishes: true, content: true, elsewhere, files: [], unresolved: [] }
+  const publication: Publication = { ...NOTHING, publishes: true, content: true, elsewhere, from: words[j]!.end, files: [], unresolved: [] }
   if (sub === 'add' || sub === 'update-index' || sub === 'hash-object') {
     const stages = sub === 'add' ? has(parsed, 'f', 'force') : sub === 'update-index' ? has(parsed, 'add', 'index-info') : has(parsed, 'w')
     if (!stages)
@@ -190,11 +199,14 @@ function ghCommandPath(words: readonly Word[]): number[] {
 
 function gh(words: readonly Word[], fromStdin: boolean, text: string, guessed = false): Publication {
   const path = ghCommandPath(words)
-  const [group = '', sub = ''] = path.map(k => words[k]!.value)
+  const [group = '', rawSub = ''] = path.map(k => words[k]!.value)
+  // `gh api`'s second word is the endpoint, which no alias renames.
+  const sub = group === 'api' ? rawSub : GH_ALIASES.get(rawSub) ?? rawSub
   const key = group === 'pr' || group === 'issue' || group === 'api' ? group : `${group} ${sub}`
-  if (isFilledIn(group) || (GH_GROUPS.has(group) && key !== 'api' && isFilledIn(sub)))
+  if (isFilledIn(group) || (GH_GROUPS.has(group) && key !== 'api' && isFilledIn(sub))) {
     return guessed ? NOTHING : { ...NOTHING, publishes: true, unresolved: [text] }
-  const grammar = GH_GRAMMARS[key]
+  }
+  const grammar = GH_GRAMMARS[`${group} ${sub}`] ?? GH_GRAMMARS[key]
   if (!grammar || ((key === 'pr' || key === 'issue') && !GH_WRITES.has(sub)))
     return NOTHING
   if (fromStdin)
@@ -205,7 +217,7 @@ function gh(words: readonly Word[], fromStdin: boolean, text: string, guessed = 
   // without one sends only the ref.
   const fielded = key === 'api' || key === 'workflow run'
   const content = !fielded || has(parsed, 'F', 'f', 'field', 'raw-field', 'input', 'json')
-  const publication: Publication = { ...NOTHING, publishes: true, content, files: [], unresolved: [] }
+  const publication: Publication = { ...NOTHING, publishes: true, content, from: words[path.at(-1)!]!.end, files: [], unresolved: [] }
   optionFiles(parsed, grammar, publication, text)
   // A release asset may carry a display label after `#`.
   const assets = parsed.operands.slice(key === 'pr' || key === 'issue' ? parsed.operands.length : 1).map(path => path.replace(/#[^/]*$/, ''))
@@ -236,7 +248,7 @@ function gh(words: readonly Word[], fromStdin: boolean, text: string, guessed = 
  * sees the stage before.
  */
 function scriptsOf(cmd: string, words: readonly Word[], heredocs: readonly number[], hereStrings: readonly string[], command: number): string[] {
-  const name = nameOf(words[command]!)
+  const name = nameOf(cmd, words[command]!)
   const rest = words.slice(command + 1)
   if (name === 'eval')
     return [rest.map(w => w.value).join(' ')]
@@ -282,9 +294,9 @@ export function printedText(cmd: string, stage: Segment): string | null {
   if (!LITERAL_STDIN.test(stage.text)) {
     return null
   }
-  const printer = words.findIndex(w => nameOf(w) === 'echo' || nameOf(w) === 'printf')
+  const printer = words.findIndex(w => nameOf(cmd, w) === 'echo' || nameOf(cmd, w) === 'printf')
   let args = words.slice(printer + 1)
-  if (nameOf(words[printer]!) === 'echo') {
+  if (nameOf(cmd, words[printer]!) === 'echo') {
     const first = args.findIndex(w => !/^-[neE]+$/.test(w.value))
     args = first < 0 ? [] : args.slice(first)
   }
@@ -346,14 +358,61 @@ function runnerScript(name: string, rest: readonly Word[]): string | undefined {
   return word.startsWith('--') && word.includes('=') ? word.slice(word.indexOf('=') + 1) : rest[flag + 1]?.value
 }
 
+// Where the backquotes of the last command line stand. Every segment asks, so
+// counting them afresh each time would make a line of `` `a` `` quadratic.
+let ticks = { scrubbed: '', at: [] as number[] }
+
 // Quoted and escaped backticks are blanked in `scrubbed`, so the ones left
 // alternate between opening and closing.
-const backticksBefore = (scrubbed: string, at: number): number => scrubbed.slice(0, at).split('`').length - 1
+function backticksBefore(scrubbed: string, at: number): number {
+  if (ticks.scrubbed !== scrubbed) {
+    ticks = { scrubbed, at: [...scrubbed.matchAll(/`/g)].map(m => m.index) }
+  }
+  let low = 0
+  let high = ticks.at.length
+  while (low < high) {
+    const mid = (low + high) >> 1
+    if (ticks.at[mid]! < at) {
+      low = mid + 1
+    }
+    else {
+      high = mid
+    }
+  }
+  return low
+}
 
 const opensBacktick = (scrubbed: string, at: number): boolean => scrubbed[at] === '`' && backticksBefore(scrubbed, at) % 2 === 0
 
 function closesSubstitution(scrubbed: string, at: number): boolean {
   return scrubbed[at] === ')' || (scrubbed[at] === '`' && backticksBefore(scrubbed, at) % 2 === 1)
+}
+
+// `$g`, `"$GIT"` or `$(which git)`: a name the shell fills in may be git or gh.
+const isFilledInName = (word: Word): boolean => isFilledIn(word.value.slice(word.value.lastIndexOf('/') + 1))
+
+const isCandidate = (name: string, word: Word): boolean => COMMANDS.has(name) || COMMAND_RUNNERS.has(name) || isFilledInName(word)
+
+function tryCommand(cmd: string, words: readonly Word[], heredocs: readonly number[], hereStrings: readonly string[], command: number, name: string, fromStdin: boolean, text: string): Publication {
+  const rest = words.slice(command + 1)
+  if (COMMAND_RUNNERS.has(name)) {
+    const script = runnerScript(name, rest)
+    const login = (name === 'su' || name === 'runuser') && rest.some(w => LOGIN_OPTION.test(w.value))
+    return script === undefined ? NOTHING : { ...NOTHING, scripts: [script], elsewhere: login }
+  }
+  if (name === 'git') {
+    return git(rest, fromStdin, text)
+  }
+  if (name === 'gh') {
+    return gh(rest, fromStdin, text)
+  }
+  if (!COMMANDS.has(name)) {
+    // `$g add -f .env` may run git or gh with the words that follow.
+    return [git(rest, fromStdin, text, true), gh(rest, fromStdin, text, true)].find(p => p.publishes) ?? NOTHING
+  }
+  const stdinScript = name !== 'eval' && heredocs.length === 0 && hereStrings.length === 0
+    && !rest.some(w => SHELL_COMMAND_OPTION.test(w.value)) && readsScriptFromStdin(rest)
+  return { ...NOTHING, scripts: scriptsOf(cmd, words, heredocs, hereStrings, command), stdinScript }
 }
 
 /**
@@ -369,44 +428,41 @@ export function publicationOf(cmd: string, scrubbed: string, segment: Segment): 
   const { words, heredocs, hereStrings } = wordsOf(cmd, segment)
   const text = segment.text.trim()
   const end = segment.start + segment.text.length
-  // A substitution splits the segment, but the shell glues its output to the
-  // words around it: `$(which git) add` and `` git `echo add` `` are one
-  // command each, whose name or subcommand the shell fills in.
+  // Segments are joined over a substitution, so this only fires where that
+  // join could not pair the parentheses (a `case` pattern inside `$(…)`): the
+  // shell still glues the substitution's output to the words around it.
   if (closesSubstitution(scrubbed, segment.start - 1)) {
-    words.unshift({ value: '$', at: segment.start })
+    words.unshift({ value: '$', at: segment.start, end: segment.start })
   }
   if (opensBacktick(scrubbed, end)) {
-    words.push({ value: '`', at: end })
+    words.push({ value: '`', at: end, end })
   }
-  for (let command = 0; command < words.length; command++) {
-    const name = nameOf(words[command]!)
-    const rest = words.slice(command + 1)
-    const script = COMMAND_RUNNERS.has(name) ? runnerScript(name, rest) : undefined
-    if (script !== undefined) {
-      const login = (name === 'su' || name === 'runuser') && rest.some(w => LOGIN_OPTION.test(w.value))
-      return { ...NOTHING, scripts: [script], elsewhere: login }
-    }
-    const fromStdin = words.slice(0, command).some(w => ARGUMENTS_FROM_STDIN.has(nameOf(w)))
-    // `$g add -f .env` may run git or gh with the words that follow.
-    if (isFilledIn(name)) {
-      const guess = [git(rest, fromStdin, text, true), gh(rest, fromStdin, text, true)].find(p => p.publishes)
-      if (guess) {
-        return guess
-      }
+  // A word that only looks like the command (`A=/git git commit`, `sudo -u git
+  // git add`) can stand before it, so each one is tried in turn, up to a bound.
+  let fromStdin = false
+  let tried = 0
+  let command = 0
+  for (; command < words.length && tried < MAX_COMMAND_CANDIDATES; command++) {
+    const name = nameOf(cmd, words[command]!)
+    fromStdin ||= ARGUMENTS_FROM_STDIN.has(name)
+    if (!isCandidate(name, words[command]!)) {
       continue
     }
-    if (!COMMANDS.has(name)) {
-      continue
+    tried++
+    const publication = tryCommand(cmd, words, heredocs, hereStrings, command, name, fromStdin, text)
+    if (publication.publishes || publication.scripts.length > 0 || publication.stdinScript) {
+      return publication
     }
-    if (name === 'git') {
-      return git(rest, fromStdin, text)
-    }
-    if (name === 'gh') {
-      return gh(rest, fromStdin, text)
-    }
-    const stdinScript = name !== 'eval' && heredocs.length === 0 && hereStrings.length === 0
-      && !rest.some(w => SHELL_COMMAND_OPTION.test(w.value)) && readsScriptFromStdin(rest)
-    return { ...NOTHING, scripts: scriptsOf(cmd, words, heredocs, hereStrings, command), stdinScript }
+  }
+  // A command the bound kept this from trying is unknown, not harmless: a word
+  // before it may be an assignment, or an unquoted expansion that is empty and
+  // vanishes, as in `$a $b … git add -f .env`. A quoted one never vanishes.
+  const untried = (word: Word): boolean => {
+    const name = nameOf(cmd, word)
+    return COMMANDS.has(name) || COMMAND_RUNNERS.has(name) || (isFilledInName(word) && !/["']/.test(cmd.slice(word.at, word.end)))
+  }
+  if (words.slice(command).some(untried)) {
+    return { ...NOTHING, publishes: true, unresolved: [text] }
   }
   return NOTHING
 }
@@ -427,46 +483,54 @@ function literalSubstitutionEnd(cmd: string, at: number): number {
 }
 
 /**
- * Whether the text from `from` holds a command or process substitution whose
- * output is unknown, outside single quotes. It stops at the end of the simple
- * command unless `to` is given, and skips the literal `$(cat <<'EOF' … )` that
- * agents write commit messages with.
+ * The offset of the first command or process substitution from `from` whose
+ * output is unknown, outside single quotes, or -1 when there is none. It stops
+ * at the end of the simple command unless `to` is given, and skips the literal
+ * `$(cat <<'EOF' … )` that agents write commit messages with.
+ *
+ * It follows quotes itself, over `code`: `cmd` with its comments and heredoc
+ * bodies blanked, since an apostrophe in either would otherwise open a quote
+ * that hides the code after it.
  */
-export function hasOpaqueSubstitution(cmd: string, from: number, to?: number): boolean {
+export function opaqueSubstitutionAt(cmd: string, code: string, from: number, to?: number): number {
   const end = to ?? cmd.length
   let quoted = false
   for (let i = from; i < end; i++) {
-    const c = cmd[i]!
+    const c = code[i]!
     if (c === '\\') {
       i++
     }
-    else if (!quoted && c === '$' && cmd[i + 1] === '\'') {
+    else if (!quoted && c === '$' && code[i + 1] === '$' && code[i + 2] !== '(') {
+      i++
+    }
+    else if (!quoted && c === '$' && code[i + 1] === '\'') {
       ANSI_C_STRING.lastIndex = i
-      if (!ANSI_C_STRING.test(cmd))
-        return false
-      i = ANSI_C_STRING.lastIndex - 1
+      if (ANSI_C_STRING.test(code))
+        i = ANSI_C_STRING.lastIndex - 1
     }
     else if (!quoted && c === '\'') {
-      const close = cmd.indexOf('\'', i + 1)
-      if (close < 0)
-        return false
-      i = close
+      const close = code.indexOf('\'', i + 1)
+      if (close >= 0)
+        i = close
     }
     else if (c === '"') {
       quoted = !quoted
     }
     else if (!quoted && to === undefined && '\n;&|)'.includes(c)) {
-      return false
+      return -1
     }
-    else if (c === '`' || (!quoted && (c === '<' || c === '>') && cmd[i + 1] === '(')) {
-      return true
+    else if (c === '`' || (!quoted && (c === '<' || c === '>') && code[i + 1] === '(')) {
+      return i
     }
-    else if (c === '$' && cmd[i + 1] === '(') {
-      const after = cmd[i + 2] === '(' ? -1 : literalSubstitutionEnd(cmd, i + 2)
+    else if (c === '$') {
+      const open = afterContinuations(code, i + 1)
+      if (code[open] !== '(')
+        continue
+      const after = code[open + 1] === '(' ? -1 : literalSubstitutionEnd(cmd, open + 1)
       if (after < 0)
-        return true
+        return i
       i = after - 1
     }
   }
-  return false
+  return -1
 }

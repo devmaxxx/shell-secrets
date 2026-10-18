@@ -15,15 +15,28 @@ const SINGLE_QUOTED = /'[^']*'/
 
 const ESCAPED = /\\[\s\S]/
 
+// `$$` is the process id. Read as a pair, its second `$` cannot open an ANSI-C
+// string: `$$'a\'` is the id followed by a plain `'a\'`, which ends at the
+// backslash.
+const PROCESS_ID = /\$\$/
+
 // A `#` opens a comment at the start of a word: after a blank or an operator.
-// It takes that character with it, so an escaped space cannot open one.
-const COMMENT = /(?:^|[\s;&|()])#[^\n]*/
+// Only space, tab and newline are blanks to bash, so after a carriage return or
+// a no-break space the `#` belongs to the word. The comment takes that
+// character with it, so an escaped space cannot open one.
+const BEFORE_COMMENT = /[ \t\n;&|()]/
+
+// The `)` that closes a `$(…)` is part of its word, so `echo $(:)# x` prints
+// `# x`. Only a substitution with no parenthesis inside is told apart.
+const COMMENT = /(?:^|[ \t\n;&|(]|\)(?<!\$\([^()]*\)))#[^\n]*/
+
+export const COMMENT_OPENER = new RegExp(`^${BEFORE_COMMENT.source}#`)
 
 // One pass, leftmost first: a quote opened before a `<<` hides it, a quote
 // inside a heredoc body, a comment or the other kind of quote is not a quote,
 // and an escaped quote or space outside quotes opens nothing.
 export const OPAQUE = new RegExp(
-  [HEREDOC, ANSI_C_QUOTED, DOUBLE_QUOTED, SINGLE_QUOTED, ESCAPED, COMMENT].map(r => r.source).join('|'),
+  [HEREDOC, PROCESS_ID, ANSI_C_QUOTED, DOUBLE_QUOTED, SINGLE_QUOTED, ESCAPED, COMMENT].map(r => r.source).join('|'),
   'g',
 )
 
@@ -63,37 +76,87 @@ const COMMAND_PREFIX
 
 // A brace opens or closes a group only as a word of its own. Inside a word
 // (`find -exec … {} +`, `${X}`, `{a,b}`) it is text, and cutting the segment
-// there would drop the arguments after it.
-export const SEGMENT = /(?:[^\n;&|(){}`]|(?<=[^\s;&|()`])[{}]|[{}](?=[^\s;&|()`]))+/g
+// there would drop the arguments after it. So is the `}` that closes a `${`,
+// even after a blank, as in `${X:- }`.
+export const SEGMENT = /(?:[^\n;&|(){}`]|(?<=[^\s;&|()`])[{}]|[{}](?=[^\s;&|()`])|\}(?<=\$\{[^}\n]*\}))+/g
+
+// A backquoted substitution runs to the next backquote.
+const BACKQUOTED = /`(?:[^`\\]|\\[\s\S])*`/
+
+// A character inside a parenthesis that opens nothing. A `$` before `(` or `'`
+// is left out, so every text has one reading and an unclosed group fails in
+// linear time instead of trying them all.
+const IN_PARENTHESES = /[^()'"\\`$]|\$(?![('])/
+
+const PARENTHESIZED = [IN_PARENTHESES, ANSI_C_QUOTED, DOUBLE_QUOTED, SINGLE_QUOTED, ESCAPED, BACKQUOTED].map(r => r.source).join('|')
+
+function group(depth: number): string {
+  return `\\((?:${PARENTHESIZED}${depth > 0 ? `|\\$?${group(depth - 1)}` : ''})*\\)`
+}
+
+// `$(…)` and `$((…))`, with up to three more levels of parentheses inside.
+const SUBSTITUTION = `\\$${group(3)}`
 
 /**
- * A shell word starting at the sticky index: quoted parts, escapes and plain
- * characters run together until a blank, a newline or an operator. Only space
- * and tab are blanks to bash: a `\r` or a no-break space is part of the word,
- * so `> .env\r` writes a file that is not `.env`.
+ * A shell word starting at the sticky index: quoted parts, escapes,
+ * substitutions and plain characters run together until a blank, a newline or
+ * an operator. Only space and tab are blanks to bash: a `\r` or a no-break space
+ * is part of the word, so `> .env\r` writes a file that is not `.env`.
  */
 export const WORD = new RegExp(
-  `(?:${[ANSI_C_QUOTED, DOUBLE_QUOTED, SINGLE_QUOTED, ESCAPED].map(r => r.source).join('|')}|[^ \\t\\n"'|;&<>()\\\\])+`,
+  `(?:${[PROCESS_ID, ANSI_C_QUOTED, DOUBLE_QUOTED, SINGLE_QUOTED, ESCAPED].map(r => r.source).join('|')}|${SUBSTITUTION}|${BACKQUOTED.source}|[^ \\t\\n"'|;&<>()\\\\])+`,
   'y',
+)
+
+/**
+ * What can open a command word and expand to nothing, leaving the rest of the
+ * word as the command name: `${X}git`, `$1git`, `"$X"git`, `$(true)git`. A
+ * `$name` takes every name character, so `$Xgit` is one variable and nothing
+ * is left of it.
+ */
+export const LEADING_EXPANSIONS = new RegExp(
+  `^(?:\\$\\{[^}]*\\}|\\$(?:[A-Za-z_]\\w*|[1-9@*])|${SUBSTITUTION}|${BACKQUOTED.source}|(?="[^"]*[$\`])${DOUBLE_QUOTED.source})+`,
 )
 
 // Only the devices that cannot carry data off the machine. `/dev/tcp/…` and
 // `/dev/udp/…` are bash network sockets, and `/dev/../x` is an ordinary file.
 export const HARMLESS_DEVICE = /^\/dev\/(?:null|zero|full|stdout|stderr|tty)$/
 
-// `>`, `>>`, `>|`, `&>`, `>&file` with an optional fd; `>&2` and `>&-` only
-// duplicate or close a descriptor and name no file.
-export const REDIRECT = /(?:\d+|&)?>(?:>|\||&(?![\d-]))?(?!&[\d-])[ \t]*/g
+// Ends a word: `>&2` duplicates a descriptor only as a whole word, and `>&2.txt`
+// writes the file `2.txt`.
+const WORD_END = String.raw`(?![^\s;&|<>()])`
+
+// `>&2-` moves the descriptor instead of copying it; either way no file is named.
+const DESCRIPTOR = String.raw`(?:\d+-?|-)${WORD_END}`
+
+// `>`, `>>`, `>|`, `&>`, `>&file` with an optional fd; a duplicated or closed
+// descriptor names no file. The fd is a whole run of digits: without the
+// lookbehind a long run with no `>` after it is retried from each of its
+// digits, which is quadratic.
+export const REDIRECT = new RegExp(String.raw`(?<!\d)(?:\d+|&)?>(?:>|\||&(?!${DESCRIPTOR}))?(?!&${DESCRIPTOR})[ \t]*`, 'g')
+
+// What a lone write may carry besides its targets: a duplicated descriptor, and
+// a stream thrown away.
+export const HARMLESS_REDIRECT = new RegExp(String.raw`\d?>&\d+-?${WORD_END}|\d>\s*/dev/null(?![^\s|<>])`, 'g')
 
 export const TEE = new RegExp(`^\\s*${COMMAND_PREFIX}tee(?=\\s|$)`)
 
 // A line continuation between words separates them like a blank.
 export const BLANKS = /(?:[ \t]|\\\n)*/y
 
+// What a command line is made of up to the newline that ends it: a quote, an
+// escape or a comment each run over any newline inside, and the first newline
+// outside them is the end. The newline is tried first, so a comment never
+// starts on the one that ends the line.
+export const LINE_PIECE = new RegExp(
+  `\\n|${[PROCESS_ID, ANSI_C_QUOTED, DOUBLE_QUOTED, SINGLE_QUOTED, ESCAPED, COMMENT].map(r => r.source).join('|')}`,
+  'g',
+)
+
 // After `<<`: an optional `-`, then the delimiter, bare, quoted or escaped.
 export const HEREDOC_DELIMITER = /(-?)[ \t]*(["']?)\\?(\w+)\2/y
 
-export const REDIRECT_OPERATOR = /[<>]+[&|]?/y
+export const REDIRECT_OPERATOR = /&?[<>]+[&|]?/y
 
 export const FILE_READER = new RegExp(`^\\s*${COMMAND_PREFIX}(?:cat|head|tail)(?=\\s)`)
 
@@ -123,6 +186,10 @@ export const MAX_COMMAND_LENGTH = 100_000
 
 // `bash -c "bash -c '…'"` is followed this many levels deep, then blocked.
 export const MAX_SCRIPT_DEPTH = 3
+
+// A segment's words that name git, gh or a shell are tried as the command this
+// many at a time, so a line made of them stays linear.
+export const MAX_COMMAND_CANDIDATES = 8
 
 export const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'mksh', 'ash'])
 
@@ -174,6 +241,11 @@ export const GIT_GRAMMARS: Readonly<Record<string, Grammar>> = {
 }
 
 const GH_BODY: Grammar = { short: 'aBbFHlmprtTR', long: [['body-file', 0, true], ['body', 0, true], ['title', 0, true], ['base', 0, true], ['head', 0, true], ['repo', 0, true]], files: ['F', 'body-file'] }
+
+// Where `-a`, `-m` and `-r` choose a review verdict or a merge method they take
+// no value, so reading one as valued would swallow the `-F file` after it.
+const GH_REVIEW: Grammar = { ...GH_BODY, short: 'bFR' }
+const GH_MERGE: Grammar = { ...GH_BODY, short: 'AbFtR' }
 const GH_RELEASE: Grammar = { short: 'nFtR', long: [['notes-file', 0, true], ['notes', 0, true], ['title', 0, true], ['target', 0, true], ['repo', 0, true], ['discussion-category', 0, true], ['notes-start-tag', 0, true]], files: ['F', 'notes-file'] }
 
 // Calls that publish only the text on their own line, which is scanned with
@@ -181,10 +253,15 @@ const GH_RELEASE: Grammar = { short: 'nFtR', long: [['notes-file', 0, true], ['n
 const GH_TEXT: Grammar = { short: 'R', long: [['repo', 0, true]], files: [] }
 
 // The `gh pr` and `gh issue` subcommands that send text.
-export const GH_WRITES = new Set(['create', 'edit', 'comment', 'review', 'merge', 'close'])
+export const GH_WRITES = new Set(['create', 'edit', 'comment', 'review', 'merge', 'close', 'reopen', 'revert'])
+
+// `gh pr new` runs `gh pr create`, and so on for issues, releases and gists.
+export const GH_ALIASES: ReadonlyMap<string, string> = new Map([['new', 'create']])
 
 export const GH_GRAMMARS: Readonly<Record<string, Grammar>> = {
   'pr': GH_BODY,
+  'pr review': GH_REVIEW,
+  'pr merge': GH_MERGE,
   'issue': GH_BODY,
   'release create': GH_RELEASE,
   'release edit': GH_RELEASE,

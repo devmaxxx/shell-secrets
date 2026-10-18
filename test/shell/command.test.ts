@@ -1,9 +1,15 @@
 import { basename } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { findSecretsInCommand, onlyWritesTo } from '../../src'
+import { MAX_COMMAND_LENGTH } from '../../src/shell/constants'
 import { fake, rand } from '../support/fake'
 
 const ids = (cmd: string): string[] => findSecretsInCommand(cmd).findings.map(f => f.ruleId)
+
+function scan(cmd: string): { files: string[], unresolved: string[] } {
+  const { messageFiles, unresolvedSources } = findSecretsInCommand(cmd)
+  return { files: messageFiles, unresolved: unresolvedSources }
+}
 
 // The policy a git-aware caller would apply: a write is harmless only when it
 // lands in an .env file that git ignores.
@@ -283,7 +289,12 @@ describe('messageFiles: only flags that publish a file', () => {
 })
 
 describe('hostile command lines, in linear time', () => {
+  // A command over the length gate is blocked before it is parsed, so a longer
+  // run says nothing about the parser; these stay just under the gate.
+  const sized = (unit: string, head = '', tail = ''): string =>
+    head + unit.repeat(Math.floor((MAX_COMMAND_LENGTH - head.length - tail.length) / unit.length)) + tail
   const within = (ms: number, cmd: string): void => {
+    expect(cmd.length).toBeLessThanOrEqual(MAX_COMMAND_LENGTH)
     const started = performance.now()
     findSecretsInCommand(cmd)
     onlyWritesTo(cmd, () => true)
@@ -291,31 +302,64 @@ describe('hostile command lines, in linear time', () => {
   }
 
   it('scans a long run of unterminated heredocs', () => {
-    within(2000, '<<A\n'.repeat(80_000))
-    within(2000, Array.from({ length: 80_000 }, (_, i) => `<<A${i}\n`).join(''))
+    within(2000, sized('<<A\n'))
+    within(2000, Array.from({ length: 10_000 }, (_, i) => `<<A${i}\n`).join('').slice(0, MAX_COMMAND_LENGTH))
+  })
+
+  it('scans a long run of heredoc headers that a backslash or a quote carries over the newline', () => {
+    within(500, sized('<<A \\\n'))
+    within(500, sized('<<A \\\n', '', 'A\n'))
+    within(500, sized('<<A $$ \\\n'))
+    within(500, sized('<<A $x \\\n'))
+    within(500, sized('<<A "x\n'))
+    within(500, sized('<<A #c\nA\n'))
   })
 
   it('scans a long run of wrappers whose options could be read two ways', () => {
-    within(2000, 'sudo -u '.repeat(50_000))
-    within(2000, 'env -i A=1 '.repeat(50_000))
+    within(2000, sized('sudo -u '))
+    within(2000, sized('env -i A=1 '))
   })
 
   it('scans a tee with a long run of operands', () => {
-    within(2000, `echo a | tee ${'x '.repeat(100_000)}`)
+    within(2000, sized('x ', 'echo a | tee '))
   })
 
   it('scans long runs of braces, line continuations and ANSI-C quotes', () => {
-    within(2000, '{'.repeat(100_000))
-    within(2000, 'git add {} '.repeat(30_000))
-    within(2000, 'git \\\n'.repeat(50_000))
-    within(2000, `git commit -m ${'$\''.repeat(50_000)}`)
-    within(2000, `echo a > .env${'\r'.repeat(100_000)}`)
+    within(2000, '{'.repeat(MAX_COMMAND_LENGTH))
+    within(2000, sized('git add {} '))
+    within(2000, sized('git \\\n'))
+    within(2000, sized('$\'', 'git commit -m '))
+    within(2000, sized('\r', 'echo a > .env'))
   })
 
   it('scans a gh call with a long run of flags before its command', () => {
-    within(2000, `gh ${'-R x '.repeat(50_000)}pr create`)
-    within(2000, `gh ${'--repo '.repeat(50_000)}`)
-    within(2000, 'set -- $1 '.repeat(50_000))
+    within(2000, sized('-R x ', 'gh ', 'pr create'))
+    within(2000, sized('--repo ', 'gh '))
+    within(2000, sized('set -- $1 '))
+  })
+
+  it('scans a long run of digits, which could each start a file descriptor', () => {
+    within(500, '1'.repeat(MAX_COMMAND_LENGTH))
+    within(500, sized('1', 'echo '))
+  })
+
+  it('looks for the substitution that fills a variable once, however many publishers follow it', () => {
+    within(500, sized('git tag $1;'))
+    within(500, sized('k=$(x);git commit -m "$k";'))
+  })
+
+  it('scans long runs of substitutions, backquotes and the tee inside them', () => {
+    // Each backquote pair is a command of its own, and a word read from inside
+    // one must stop at the backquote that closes it.
+    within(2000, '`tee x` '.repeat(4000))
+    within(500, sized('`a` '))
+    within(500, sized('`a`'))
+    within(500, sized('git -C `a '))
+    within(500, sized('git commit -F $(a '))
+    within(500, sized('git commit -F $(a) '))
+    within(500, sized('$(a$(a$(a$(a$(a '))
+    within(500, sized('x=$(git commit -F f);'))
+    within(500, sized('git add -f $(ls) '))
   })
 })
 
@@ -351,10 +395,6 @@ describe('wrappers with options, clobber redirects and value-taking flags', () =
 })
 
 describe('publishers the shell hides behind quoting, wrappers and substitutions', () => {
-  const scan = (cmd: string): { files: string[], unresolved: string[] } => {
-    const { messageFiles, unresolvedSources } = findSecretsInCommand(cmd)
-    return { files: messageFiles, unresolved: unresolvedSources }
-  }
   const caught = (cmd: string, path = '.env'): boolean => {
     const { files, unresolved } = scan(cmd)
     return files.includes(path) || unresolved.length > 0
@@ -451,6 +491,61 @@ describe('publishers the shell hides behind quoting, wrappers and substitutions'
       'git status -m "$(cat .env)"',
     ])
       expect(scan(cmd).unresolved, cmd).toEqual([])
+  })
+
+  it('does not pair an apostrophe in a comment or a heredoc body with a quote', () => {
+    for (const cmd of [
+      `# it's\nk=$(cat .env); git commit -m "$k"`,
+      `echo a # it's\nk=$(cat .env); git commit -m "$k"`,
+      `cat <<EOF\nit's\nEOF\nk=$(cat .env); git commit -m "$k"`,
+      `cat <<'EOF'\nit's\nEOF\nset -- $(cat .env)\ngit commit -m "$1"`,
+      `# don't forget\nk=$(cat .env)\n# it's here\ngh pr create --body "$k"`,
+    ])
+      expect(scan(cmd).unresolved, cmd).not.toEqual([])
+    expect(scan(`# it's\ngit commit -m "$(echo fix)"`).unresolved).toEqual([])
+  })
+
+  it('counts a variable a substitution fills as hidden content in a script that reads it', () => {
+    for (const cmd of [
+      `export K="$(cat .env)"; bash -c 'git commit -m "$K"'`,
+      `K="$(cat .env)" bash -c 'git commit -m "$K"'`,
+      `k=$(cat .env); eval 'git commit -m "$k"'`,
+      `bash -c 'git commit -m "$1"' _ "$(cat .env)"`,
+      `read -r k < .env; sh -c 'gh pr create --body "$k"'`,
+    ])
+      expect(scan(cmd).unresolved, cmd).not.toEqual([])
+    for (const cmd of [
+      `bash -c 'git commit -m "$1"' _ literal`,
+      `bash -c 'git commit -m "fix: x"'`,
+      `k=ok; bash -c 'git commit -m "$k"'`,
+    ])
+      expect(scan(cmd).unresolved, cmd).toEqual([])
+  })
+
+  it('finds git or gh past a word that only names them', () => {
+    for (const cmd of [
+      'A=/git git commit -F .env',
+      'SHELL=/bin/bash git commit -F .env',
+      'sudo -u git git commit -F .env',
+      'A=/gh gh pr create --body-file .env',
+    ])
+      expect(scan(cmd).files, cmd).toEqual(['.env'])
+  })
+
+  it('blocks a command that stands past more words that may name it than are tried', () => {
+    const many = (word: string): string => Array.from({ length: 8 }, (_, k) => word.replace('#', String.fromCharCode(97 + k))).join(' ')
+    for (const cmd of [
+      `${many('$#')} git add -f .env`,
+      `${many('#=/git')} git add -f .env`,
+      `${many('$#')} $x add -f .env`,
+    ])
+      expect(scan(cmd).unresolved, cmd).not.toEqual([])
+    expect(scan(`printf '%s' ${many('"$#"')} "$z"`)).toEqual({ files: [], unresolved: [] })
+  })
+
+  it('does not take the name of an Object.prototype member for a git subcommand', () => {
+    for (const sub of ['constructor', 'toString', 'valueOf', '__proto__', 'hasOwnProperty'])
+      expect(scan(`git ${sub} -F .env`), sub).toEqual({ files: [], unresolved: [] })
   })
 
   it('treats a file the command may change, however it names it, as unknown', () => {
@@ -555,10 +650,6 @@ describe('publishers the shell hides behind quoting, wrappers and substitutions'
 })
 
 describe('words and commands as bash splits them', () => {
-  const scan = (cmd: string): { files: string[], unresolved: string[] } => {
-    const { messageFiles, unresolvedSources } = findSecretsInCommand(cmd)
-    return { files: messageFiles, unresolved: unresolvedSources }
-  }
   const exactlyEnv = (path: string): boolean => path === '.env'
 
   it('keeps a carriage return or a no-break space inside the word, where bash keeps it', () => {
@@ -581,6 +672,93 @@ describe('words and commands as bash splits them', () => {
     expect(scan('X=$(cat .env); git commit -m ${X}').unresolved).not.toEqual([])
     expect(scan('{ git add -f .env; }').files).toEqual(['.env'])
     expect(scan('f() { git add -f .env;}').files).toEqual(['.env'])
+    expect(scan('git commit ${X:- } -F .env').files).toEqual(['.env'])
+    expect(scan('git commit ${X:+ } -F .env').files).toEqual(['.env'])
+  })
+
+  it('reads $$ as the process id, so a quote after it opens a plain string', () => {
+    expect(scan(`git commit -m $$'x\\' $(cat .env) 'y'`).unresolved).not.toEqual([])
+    expect(scan(`git commit -m $$'x\\'"$(cat .env)"'y'`).unresolved).not.toEqual([])
+    expect(scan(`git commit -m $$$'it\\'s' -m ok`).unresolved).toEqual([])
+  })
+
+  it('opens a comment only after a space, a tab, a newline or an operator', () => {
+    for (const blank of ['\r', ' '])
+      expect(scan(`echo hi${blank}# x; git add -f .env`).files, JSON.stringify(blank)).toEqual(['.env'])
+    expect(scan('echo hi # x; git add -f .env').files).toEqual([])
+    expect(scan('echo hi # x\ngit add -f .env').files).toEqual(['.env'])
+    expect(scan('echo hi;# x\ngit add -f .env').files).toEqual(['.env'])
+  })
+
+  it('does not open a comment at the parenthesis that closes a substitution', () => {
+    expect(scan('echo $(:)# x; git add -f .env').files).toEqual(['.env'])
+    expect(scan('echo "$(date)"# x; git add -f .env').files).toEqual(['.env'])
+    expect(scan('(true)# x; git add -f .env').files).toEqual([])
+    expect(scan('(true) # x; git add -f .env').files).toEqual([])
+  })
+
+  it('finds the command behind an expansion glued to its name', () => {
+    for (const name of ['${X}git', '${X:-}git', '${1}git', '$1git', '$@git', '"$X"git', '$X"git"', '$(true)git', '`true`git'])
+      expect(scan(`${name} add -f .env`).files, name).toEqual(['.env'])
+    expect(scan('${X}gh pr create -F .env').files).toEqual(['.env'])
+    expect(scan('A=1 ${X}git commit -m "$(cat .env)"').unresolved).not.toEqual([])
+    expect(scan('{ ${X}git add -f .env; }').files).toEqual(['.env'])
+    // `$Xgit` is a variable of its own, not `$X` before git, but it may hold git.
+    expect(scan('$Xgit add -f .env').files).toEqual(['.env'])
+  })
+
+  it('ends a heredoc header on the newline that ends the command line', () => {
+    const token = fake.github()
+    for (const cmd of [
+      `cat <<'EOF' > .env \\\n> other.txt\n${token}\nEOF`,
+      `cat <<'EOF' > .\\\nenv >>x/.env''\n${token}\nEOF\n`,
+      `cat > .env <<EOF "x\n"; echo ${token} >> config.js\nEOF`,
+      `cat > .env <<EOF && \\\necho ${token} >> config.js\nEOF`,
+    ])
+      expect(onlyWritesTo(cmd, exactlyEnv), cmd).toBe(false)
+    expect(findSecretsInCommand(`cat <<'EOF' > .env \\\n> other.txt\nx\nEOF`).redirectTargets).toEqual(['.env', 'other.txt'])
+    expect(findSecretsInCommand(`cat <<'EOF' > .\\\nenv >>x/.env''\nx\nEOF`).redirectTargets).toEqual(['.env', 'x/.env'])
+    expect(onlyWritesTo(`cat > .env <<'EOF'\n${token}\nEOF`, exactlyEnv)).toBe(true)
+  })
+
+  it('counts a substitution that a line continuation splits after the dollar sign', () => {
+    expect(scan('git commit -m "$\\\n(cat .env)"').unresolved).not.toEqual([])
+    expect(scan('k=$\\\n(cat .env); git commit -m "$k"').unresolved).not.toEqual([])
+  })
+
+  it('decodes the escapes of an ANSI-C quoted word, as bash does', () => {
+    expect(scan(`git commit -F $'\\x2eenv'`).files).toEqual(['.env'])
+    expect(scan(`git commit -F $'\\056env'`).files).toEqual(['.env'])
+    expect(scan(`git commit -F $'\\u002eenv'`).files).toEqual(['.env'])
+    expect(scan(`$'\\x67it' add -f .env`).files).toEqual(['.env'])
+    expect(scan(`git $'a\\x64d' -f .env`).files).toEqual(['.env'])
+    expect(findSecretsInCommand(`echo ok > $'it\\'s'`).redirectTargets).toEqual(['it\'s'])
+    expect(findSecretsInCommand(`echo ok > $'a\\x00b'`).redirectTargets).toEqual(['a'])
+    expect(scan(`echo ok > '\\x2eenv'; git commit -F $'\\x2eenv'`).files).toEqual(['.env'])
+  })
+
+  it('reads the review verdict and merge method flags of gh as flags without a value', () => {
+    for (const cmd of [
+      'gh pr review 12 -a -F .env',
+      'gh pr review 12 -r -F .env',
+      'gh pr review 12 -c -F .env',
+      'gh pr merge 12 -m -F .env',
+      'gh pr merge 12 -r -F .env',
+      'gh pr merge 12 -s -d -F .env',
+      'gh pr merge 12 -t subject -F .env',
+      'gh pr merge 12 -A a@b.c -F .env',
+      'gh pr create -a me -F .env',
+    ])
+      expect(scan(cmd).files, cmd).toEqual(['.env'])
+  })
+
+  it('counts the gh subcommands that reopen, revert and create under another name', () => {
+    expect(scan('gh pr reopen 12 -c "$(cat .env)"').unresolved).not.toEqual([])
+    expect(scan('gh issue reopen 12 -c "$(cat .env)"').unresolved).not.toEqual([])
+    expect(scan('gh pr revert 12 -F .env').files).toEqual(['.env'])
+    expect(scan('gh pr new -F .env').files).toEqual(['.env'])
+    expect(scan('gh issue new -F .env').files).toEqual(['.env'])
+    expect(scan('gh pr view 12 -F .env').files).toEqual([])
   })
 
   it('counts a positional parameter set from a substitution as hidden content', () => {
@@ -632,6 +810,59 @@ describe('words and commands as bash splits them', () => {
     expect(scan(`git commit -F 'm\\\nsg'`).files).toEqual(['m\\\nsg'])
     expect(findSecretsInCommand('echo ok | tee \\\n  .env').redirectTargets).toEqual(['.env'])
     expect(onlyWritesTo(`echo ${fake.github()} > .e\\\nnv`, exactlyEnv)).toBe(true)
+  })
+
+  it('keeps the rest of a command after an unquoted substitution among its words', () => {
+    expect(scan('git -c user.name=$(whoami) add -f .env').files).toEqual(['.env'])
+    expect(scan('git -c user.name=`whoami` add -f .env').files).toEqual(['.env'])
+    expect(scan('git -c a=$(echo $(echo b)) add -f .env').files).toEqual(['.env'])
+    expect(scan('git -c a=$(echo ")") add -f .env').files).toEqual(['.env'])
+    expect(scan('git -C $(pwd) add -f .env').unresolved).toEqual(['.env'])
+    expect(scan('git -c core.editor=$(which true) commit --allow-empty -F msg.txt').files).toEqual(['msg.txt'])
+    expect(scan('git commit --cleanup=$(echo verbatim) -F msg.txt').files).toEqual(['msg.txt'])
+    expect(scan('gh -R $(git remote get-url origin) pr create -t x -F body').files).toEqual(['body'])
+    expect(scan('git -c a=$(b) tag -m "$(cat .env)" v1').unresolved).not.toEqual([])
+  })
+
+  it('counts a substitution among the arguments of a publisher, but not one before its subcommand', () => {
+    expect(scan('git -c user.name=$(whoami) commit -m "$(cat .env)"').unresolved).not.toEqual([])
+    expect(scan('git -c user.name=$(whoami) commit -m "fix: x"')).toEqual({ files: [], unresolved: [] })
+    expect(scan('git -C "$(git rev-parse --show-toplevel)" commit -m "fix: x"')).toEqual({ files: [], unresolved: [] })
+    expect(scan('gh -R $(git remote get-url origin) pr create -t x -b y')).toEqual({ files: [], unresolved: [] })
+    expect(scan('gh -R $(git remote get-url origin) pr create -t x -b "$(cat .env)"').unresolved).not.toEqual([])
+  })
+
+  it('reads a command in a substitution as its own, unaffected by the command around it', () => {
+    expect(scan('out=$(git commit -F msg.txt 2>&1)')).toEqual({ files: ['msg.txt'], unresolved: [] })
+    expect(scan('echo $(git commit -F msg.txt)')).toEqual({ files: ['msg.txt'], unresolved: [] })
+    expect(scan('out=`git commit -F msg.txt`')).toEqual({ files: ['msg.txt'], unresolved: [] })
+    expect(scan('echo $(git commit -F msg.txt) && cp .env msg.txt').files).toEqual(['msg.txt'])
+    expect(scan('echo $(cp .env msg.txt) && git commit -F msg.txt').unresolved).toEqual(['msg.txt'])
+    expect(scan('cp .env msg.txt && out=$(git commit -F msg.txt)').unresolved).toEqual(['msg.txt'])
+  })
+
+  it('does not take a dollar sign inside single quotes for an expansion', () => {
+    expect(scan(`cd "$(git rev-parse --show-toplevel)" && git commit -m 'fix: costs $5'`).unresolved).toEqual([])
+    expect(scan(`git add $(git ls-files -m) && git commit -m 'quote "$@" in a wrapper'`).unresolved).toEqual([])
+    expect(scan(`k=$(cat .env); git commit -m 'costs $k'`).unresolved).toEqual([])
+    expect(scan(`k=$(cat .env); git commit -m "costs $k"`).unresolved).not.toEqual([])
+    expect(scan(`k=$(cat .env); git commit -m "it's $k"`).unresolved).not.toEqual([])
+  })
+
+  it('reads a word after >& as a file unless it is a descriptor', () => {
+    for (const word of ['2.txt', '2~', '2x', '2,x', 'log'])
+      expect(findSecretsInCommand(`echo T > .env >&${word}`).redirectTargets, word).toEqual(['.env', word])
+    for (const descriptor of ['1', '2', '-', '2-'])
+      expect(findSecretsInCommand(`echo T > .env >&${descriptor}`).redirectTargets, descriptor).toEqual(['.env'])
+    expect(onlyWritesTo(`echo ${fake.github()} > .env >&2.txt`, ignoredEnv)).toBe(false)
+    expect(onlyWritesTo(`echo ${fake.github()} > .env 2>&1`, ignoredEnv)).toBe(true)
+  })
+
+  it('reads the operands of a tee that a redirect with an ampersand splits off', () => {
+    expect(findSecretsInCommand('echo ok | tee a 2>&1 b').redirectTargets).toEqual(['a', 'b'])
+    expect(findSecretsInCommand('echo ok | tee a &>/dev/null b').redirectTargets).toEqual(['a', 'b'])
+    expect(findSecretsInCommand('echo ok | tee a & b').redirectTargets).toEqual(['a'])
+    expect(findSecretsInCommand('x=`echo ok | tee a` b').redirectTargets).toEqual(['a'])
   })
 })
 

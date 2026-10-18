@@ -28,7 +28,7 @@ export function findEncoded(text: string, scan: (decoded: string) => Finding[]):
   for (const match of text.matchAll(BASE64_BLOB)) {
     const decoded = decodeBase64(match[0])
     const inner = decoded === null ? undefined : scan(decoded)[0]
-    if (!decoded || !inner)
+    if (!inner)
       continue
     found.push({
       ...inner,
