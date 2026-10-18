@@ -197,7 +197,7 @@ const normalise = (path: string): string => path.replace(/^(?:\.\/)+/, '')
  */
 function messageFiles(cmd: string, scrubbed: string, depth = 0): Published {
   const all = segments(scrubbed).filter(segment => segment.text.trim() !== '')
-  const found = all.map(segment => publicationOf(cmd, segment))
+  const found = all.map(segment => publicationOf(cmd, scrubbed, segment))
   const writes = writeTargets(cmd, scrubbed)
   const published = publishes()
   // `cp .env msg && git commit -F msg`, `dd of=msg` or a script that writes

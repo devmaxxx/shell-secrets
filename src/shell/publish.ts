@@ -41,6 +41,10 @@ const NOTHING: Publication = Object.freeze({ publishes: false, content: false, f
 
 const nameOf = (word: Word): string => word.value.slice(word.value.lastIndexOf('/') + 1)
 
+const isFilledIn = (word: string): boolean => /[$`]/.test(word)
+
+const GH_GROUPS = new Set(Object.keys(GH_GRAMMARS).map(key => key.split(' ')[0]!))
+
 /**
  * The segment's words as the shell passes them, unquoted, with redirects and
  * their targets left out; `heredocs` holds the offset after each `<<`.
@@ -125,7 +129,9 @@ function optionFiles(parsed: Parsed, grammar: Grammar, publication: Publication,
     addFile(option.value, publication, text)
 }
 
-function git(words: readonly Word[], fromStdin: boolean, text: string): Publication {
+// `guessed` is set when the command name was filled in by the shell and only
+// may be git: a subcommand filled in as well then proves nothing.
+function git(words: readonly Word[], fromStdin: boolean, text: string, guessed = false): Publication {
   let j = 0
   let elsewhere = false
   while (j < words.length && words[j]!.value.startsWith('-')) {
@@ -137,6 +143,9 @@ function git(words: readonly Word[], fromStdin: boolean, text: string): Publicat
     j += GIT_VALUED_GLOBAL.test(option) ? 2 : 1
   }
   const sub = words[j]?.value === 'stage' ? 'add' : words[j]?.value ?? ''
+  // `git $(echo add)` can run any subcommand.
+  if (isFilledIn(sub))
+    return guessed ? NOTHING : { ...NOTHING, publishes: true, unresolved: [text] }
   if (sub === 'fast-import')
     return { ...NOTHING, publishes: true, unresolved: [text] }
   const grammar = GIT_GRAMMARS[sub]
@@ -179,10 +188,12 @@ function ghCommandPath(words: readonly Word[]): number[] {
   return path
 }
 
-function gh(words: readonly Word[], fromStdin: boolean, text: string): Publication {
+function gh(words: readonly Word[], fromStdin: boolean, text: string, guessed = false): Publication {
   const path = ghCommandPath(words)
   const [group = '', sub = ''] = path.map(k => words[k]!.value)
   const key = group === 'pr' || group === 'issue' || group === 'api' ? group : `${group} ${sub}`
+  if (isFilledIn(group) || (GH_GROUPS.has(group) && key !== 'api' && isFilledIn(sub)))
+    return guessed ? NOTHING : { ...NOTHING, publishes: true, unresolved: [text] }
   const grammar = GH_GRAMMARS[key]
   if (!grammar || ((key === 'pr' || key === 'issue') && !GH_WRITES.has(sub)))
     return NOTHING
@@ -335,16 +346,38 @@ function runnerScript(name: string, rest: readonly Word[]): string | undefined {
   return word.startsWith('--') && word.includes('=') ? word.slice(word.indexOf('=') + 1) : rest[flag + 1]?.value
 }
 
+// Quoted and escaped backticks are blanked in `scrubbed`, so the ones left
+// alternate between opening and closing.
+const backticksBefore = (scrubbed: string, at: number): number => scrubbed.slice(0, at).split('`').length - 1
+
+const opensBacktick = (scrubbed: string, at: number): boolean => scrubbed[at] === '`' && backticksBefore(scrubbed, at) % 2 === 0
+
+function closesSubstitution(scrubbed: string, at: number): boolean {
+  return scrubbed[at] === ')' || (scrubbed[at] === '`' && backticksBefore(scrubbed, at) % 2 === 1)
+}
+
 /**
  * What a segment publishes through git or gh. The command is found by name
  * wherever it stands, unquoted (`'git'`, `\git`, `/usr/bin/git`), so a wrapper
  * this does not know (`nice`, `timeout 5`, `find -exec`) cannot hide it, at
- * worst it reads a file that is not one. Arguments built from stdin by
- * `xargs` or `parallel` cannot be read.
+ * worst it reads a file that is not one. A name the shell fills in (`$g`,
+ * `$(which git)`) is read as git or gh, whichever its arguments would make
+ * publish, and a git or gh subcommand the shell fills in is unknown.
+ * Arguments built from stdin by `xargs` or `parallel` cannot be read.
  */
-export function publicationOf(cmd: string, segment: Segment): Publication {
+export function publicationOf(cmd: string, scrubbed: string, segment: Segment): Publication {
   const { words, heredocs, hereStrings } = wordsOf(cmd, segment)
   const text = segment.text.trim()
+  const end = segment.start + segment.text.length
+  // A substitution splits the segment, but the shell glues its output to the
+  // words around it: `$(which git) add` and `` git `echo add` `` are one
+  // command each, whose name or subcommand the shell fills in.
+  if (closesSubstitution(scrubbed, segment.start - 1)) {
+    words.unshift({ value: '$', at: segment.start })
+  }
+  if (opensBacktick(scrubbed, end)) {
+    words.push({ value: '`', at: end })
+  }
   for (let command = 0; command < words.length; command++) {
     const name = nameOf(words[command]!)
     const rest = words.slice(command + 1)
@@ -353,10 +386,18 @@ export function publicationOf(cmd: string, segment: Segment): Publication {
       const login = (name === 'su' || name === 'runuser') && rest.some(w => LOGIN_OPTION.test(w.value))
       return { ...NOTHING, scripts: [script], elsewhere: login }
     }
+    const fromStdin = words.slice(0, command).some(w => ARGUMENTS_FROM_STDIN.has(nameOf(w)))
+    // `$g add -f .env` may run git or gh with the words that follow.
+    if (isFilledIn(name)) {
+      const guess = [git(rest, fromStdin, text, true), gh(rest, fromStdin, text, true)].find(p => p.publishes)
+      if (guess) {
+        return guess
+      }
+      continue
+    }
     if (!COMMANDS.has(name)) {
       continue
     }
-    const fromStdin = words.slice(0, command).some(w => ARGUMENTS_FROM_STDIN.has(nameOf(w)))
     if (name === 'git') {
       return git(rest, fromStdin, text)
     }

@@ -386,6 +386,34 @@ describe('publishers the shell hides behind quoting, wrappers and substitutions'
       expect(caught(cmd), cmd).toBe(true)
   })
 
+  it('reads a command name the shell fills in as git or gh, and blocks a subcommand it fills in', () => {
+    for (const cmd of [
+      'g=git; $g add -f .env',
+      '"$GIT" commit -F .env',
+      '$(which git) add -f .env',
+      '`which git` add -f .env',
+      '${GH:-gh} gist create .env',
+    ])
+      expect(scan(cmd).files, cmd).toEqual(['.env'])
+    for (const cmd of [
+      'git $(echo add) -f .env',
+      'git `echo add` -f .env',
+      'gh $(echo gist) create .env',
+      'gh pr "$action" --body-file .env',
+      'f() { git "$@"; }; f add -f .env',
+    ])
+      expect(scan(cmd).unresolved, cmd).not.toEqual([])
+    for (const cmd of [
+      '$EDITOR notes.md',
+      '"$PYTHON" -m pytest tests',
+      '$(npm bin)/tsc --noEmit',
+      'gh run $(echo view) 1',
+      '$cmd $args',
+      'git -C "$dir" status',
+    ])
+      expect(scan(cmd), cmd).toEqual({ files: [], unresolved: [] })
+  })
+
   it('reads git long-option prefixes and the subcommands that stage', () => {
     for (const cmd of [
       'git add --forc .env',
