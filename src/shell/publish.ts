@@ -1,5 +1,5 @@
 import type { Heredoc, Segment } from './parse'
-import { ANSI_C_STRING, ARGUMENTS_FROM_STDIN, CAT_HEREDOC, CLOSING_PAREN, FIELD_FROM_FILE, GH_GRAMMARS, GH_WRITES, GIT_GRAMMARS, GIT_PLACE_OPTION, GIT_VALUED_GLOBAL, LITERAL_ECHO, REDIRECT_OPERATOR, SHELL_COMMAND_OPTION, SHELLS } from './constants'
+import { ANSI_C_STRING, ARGUMENTS_FROM_STDIN, CAT_HEREDOC, CLOSING_PAREN, COMMAND_RUNNERS, ENV_VALUED_OPTION, FIELD_FROM_FILE, GH_GRAMMARS, GH_WRITES, GIT_GRAMMARS, GIT_PLACE_OPTION, GIT_VALUED_GLOBAL, LITERAL_ECHO, LOGIN_OPTION, REDIRECT_OPERATOR, RUNNER_COMMAND_OPTION, SHELL_COMMAND_OPTION, SHELLS, SPLIT_STRING_OPTION, WATCH_VALUED_OPTION } from './constants'
 import { heredocAt, skipBlanks, unquote, wordAt } from './parse'
 
 type LongOption = readonly [name: string, shortestPrefix: number, valued: boolean]
@@ -21,9 +21,9 @@ export interface Publication {
   /** Files it publishes; `-` is its stdin. */
   readonly files: string[]
   readonly unresolved: string[]
-  /** Command text it runs in a shell of its own (`bash -c`, `eval`, a heredoc). */
+  /** Command text it runs in a shell of its own (`bash -c`, `eval`, `su -c`, a heredoc). */
   readonly scripts: string[]
-  /** It points git at another directory, where a relative path means something else. */
+  /** It runs git, or its scripts, in another directory, where a relative path means something else. */
   readonly elsewhere: boolean
 }
 
@@ -227,6 +227,60 @@ function scriptsOf(cmd: string, words: readonly Word[], heredocs: readonly numbe
   return [...hereStrings, ...heredocs.map(at => heredocAt(cmd, at)).filter((doc): doc is Heredoc => doc !== null).map(doc => doc.body)]
 }
 
+// `env -S` splits its string into the command and appends the words after
+// it. env stops reading options at its first operand, which is already the
+// command or an assignment, so a `-S` past it belongs to the command.
+function splitString(rest: readonly Word[]): string | undefined {
+  for (let k = 0; k < rest.length; k++) {
+    const word = rest[k]!.value
+    const option = SPLIT_STRING_OPTION.exec(word)
+    if (option) {
+      const glued = word.slice(option[0].length)
+      const inline = glued !== '' || option[0].endsWith('=')
+      const value = inline ? glued : rest[k + 1]?.value
+      return value === undefined ? undefined : [value, ...rest.slice(inline ? k + 1 : k + 2).map(w => w.value)].join(' ')
+    }
+    if (word === '--' || !word.startsWith('-')) {
+      return undefined
+    }
+    if (ENV_VALUED_OPTION.test(word)) {
+      k++
+    }
+  }
+  return undefined
+}
+
+// watch joins its operands and runs them through `sh -c`.
+function watched(rest: readonly Word[]): string | undefined {
+  let k = 0
+  for (; k < rest.length && rest[k]!.value.startsWith('-'); k++) {
+    if (rest[k]!.value === '--') {
+      k++
+      break
+    }
+    if (WATCH_VALUED_OPTION.test(rest[k]!.value)) {
+      k++
+    }
+  }
+  return k < rest.length ? rest.slice(k).map(w => w.value).join(' ') : undefined
+}
+
+/** The command string a runner such as `su -c` or `env -S` is given, if any. */
+function runnerScript(name: string, rest: readonly Word[]): string | undefined {
+  if (name === 'env') {
+    return splitString(rest)
+  }
+  if (name === 'watch') {
+    return watched(rest)
+  }
+  const flag = rest.findIndex(w => SHELL_COMMAND_OPTION.test(w.value) || RUNNER_COMMAND_OPTION.test(w.value))
+  if (flag < 0) {
+    return undefined
+  }
+  const word = rest[flag]!.value
+  return word.startsWith('--') && word.includes('=') ? word.slice(word.indexOf('=') + 1) : rest[flag + 1]?.value
+}
+
 /**
  * What a segment publishes through git or gh. The command is found by name
  * wherever it stands, unquoted (`'git'`, `\git`, `/usr/bin/git`), so a wrapper
@@ -237,16 +291,27 @@ function scriptsOf(cmd: string, words: readonly Word[], heredocs: readonly numbe
 export function publicationOf(cmd: string, segment: Segment): Publication {
   const { words, heredocs, hereStrings } = wordsOf(cmd, segment)
   const text = segment.text.trim()
-  const command = words.findIndex(w => COMMANDS.has(nameOf(w)))
-  if (command < 0)
-    return NOTHING
-  const name = nameOf(words[command]!)
-  const fromStdin = words.slice(0, command).some(w => ARGUMENTS_FROM_STDIN.has(nameOf(w)))
-  if (name === 'git')
-    return git(words.slice(command + 1), fromStdin, text)
-  if (name === 'gh')
-    return gh(words.slice(command + 1), fromStdin, text)
-  return { ...NOTHING, scripts: scriptsOf(cmd, words, heredocs, hereStrings, command) }
+  for (let command = 0; command < words.length; command++) {
+    const name = nameOf(words[command]!)
+    const rest = words.slice(command + 1)
+    const script = COMMAND_RUNNERS.has(name) ? runnerScript(name, rest) : undefined
+    if (script !== undefined) {
+      const login = (name === 'su' || name === 'runuser') && rest.some(w => LOGIN_OPTION.test(w.value))
+      return { ...NOTHING, scripts: [script], elsewhere: login }
+    }
+    if (!COMMANDS.has(name)) {
+      continue
+    }
+    const fromStdin = words.slice(0, command).some(w => ARGUMENTS_FROM_STDIN.has(nameOf(w)))
+    if (name === 'git') {
+      return git(rest, fromStdin, text)
+    }
+    if (name === 'gh') {
+      return gh(rest, fromStdin, text)
+    }
+    return { ...NOTHING, scripts: scriptsOf(cmd, words, heredocs, hereStrings, command) }
+  }
+  return NOTHING
 }
 
 // The offset after a `$(…)` whose output is text the command already shows,

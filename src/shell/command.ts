@@ -180,7 +180,8 @@ const normalise = (path: string): string => path.replace(/^(?:\.\/)+/, '')
  * place. A file the command writes first is left out when the writer is a
  * literal `echo` or `printf`, whose text is scanned as part of the command;
  * written any other way, its contents are unknown until the command runs.
- * Shell code run through `bash -c`, `eval` or a heredoc is read the same way.
+ * Shell code run through `bash -c`, `eval`, a heredoc or a runner such as
+ * `su -c`, `env -S` or `watch` is read the same way.
  */
 function messageFiles(cmd: string, scrubbed: string, depth = 0): Published {
   const all = segments(scrubbed).filter(segment => segment.text.trim() !== '')
@@ -224,7 +225,7 @@ function messageFiles(cmd: string, scrubbed: string, depth = 0): Published {
     for (const script of publication.scripts) {
       const inner = depth < MAX_SCRIPT_DEPTH ? messageFiles(script, scrubShell(script), depth + 1) : publishes([], [script.trim()])
       published.unresolved.push(...inner.unresolved)
-      inner.files.forEach(path => place(path, moved))
+      inner.files.forEach(path => place(path, moved || publication.elsewhere))
     }
     if (publication.content && hasHiddenContent(cmd, scrubbed, segment))
       published.unresolved.push(text.trim())

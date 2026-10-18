@@ -131,6 +131,22 @@ export const ARGUMENTS_FROM_STDIN = new Set(['xargs', 'parallel'])
 
 export const SHELL_COMMAND_OPTION = /^-[A-Zabd-z]*c[A-Za-z]*$/
 
+// Programs that run a command handed to them as one string, through a shell
+// or by splitting it into words.
+export const COMMAND_RUNNERS = new Set(['env', 'su', 'runuser', 'script', 'flock', 'watch'])
+
+export const RUNNER_COMMAND_OPTION = /^--(?:session-)?command(?:=|$)/
+
+// `env -S` and `--split-string`, after any flags bundled with it.
+export const SPLIT_STRING_OPTION = /^(?:-[0iv]*S|--split-string(?:=|$))/
+
+export const ENV_VALUED_OPTION = /^-[0iv]*[uCP]$|^--(?:unset|chdir)$/
+
+export const WATCH_VALUED_OPTION = /^-[A-Za-z]*[nq]$|^--(?:interval|equexit)$/
+
+// `su -`, `su -l` and `su --login` start a login shell in the user's home.
+export const LOGIN_OPTION = /^-$|^-[A-Za-km-z]*l[A-Za-z]*$|^--login$/
+
 // Global options that point git at another repository or work tree.
 export const GIT_PLACE_OPTION = /^(?:-C|--git-dir|--work-tree)(?:=|$)/
 

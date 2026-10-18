@@ -559,3 +559,46 @@ describe('words and commands as bash splits them', () => {
     expect(onlyWritesTo(`echo ${fake.github()} > .e\\\nnv`, exactlyEnv)).toBe(true)
   })
 })
+
+describe('shell code handed on to another program', () => {
+  const scan = (cmd: string): { files: string[], unresolved: string[] } => {
+    const { messageFiles, unresolvedSources } = findSecretsInCommand(cmd)
+    return { files: messageFiles, unresolved: unresolvedSources }
+  }
+
+  it('reads the command string of env -S, su, runuser, script, watch and flock', () => {
+    for (const cmd of [
+      `env -S "git add -f .env"`,
+      `env -S"git add -f .env"`,
+      `env -i -S 'git add' -f .env`,
+      `env --split-string='git add -f .env'`,
+      `env -u HOME --split-string 'git add -f .env'`,
+      `su -c "git add -f .env"`,
+      `su deploy -c 'git add -f .env'`,
+      `su --command='git add -f .env' deploy`,
+      `runuser -u deploy -c 'git add -f .env'`,
+      `script -qc 'git add -f .env' /dev/null`,
+      `script --command "git add -f .env" /dev/null`,
+      `watch 'git add -f .env'`,
+      `watch -n 5 -d "git commit -F .env"`,
+      `flock /tmp/lock -c 'git add -f .env'`,
+      `flock -w 5 /tmp/lock --command 'git add -f .env'`,
+    ])
+      expect(scan(cmd).files, cmd).toEqual(['.env'])
+  })
+
+  it('still finds a command these programs run directly, and nothing when they run none', () => {
+    expect(scan('env FOO=1 git add -f .env').files).toEqual(['.env'])
+    expect(scan('env git commit -S -F .env').files).toEqual(['.env'])
+    expect(scan('script -q /dev/null git add -f .env').files).toEqual(['.env'])
+    expect(scan('flock /tmp/lock git add -f .env').files).toEqual(['.env'])
+    expect(scan('watch -n 1 git status')).toEqual({ files: [], unresolved: [] })
+    expect(scan('su -c whoami deploy')).toEqual({ files: [], unresolved: [] })
+  })
+
+  it('cannot place a relative path once su logs in, which moves to the user\'s home', () => {
+    expect(scan(`su - deploy -c 'git add -f .env'`).unresolved).not.toEqual([])
+    expect(scan(`su -l deploy -c 'git add -f .env'`).unresolved).not.toEqual([])
+    expect(scan(`su - deploy -c 'git add -f /srv/app/.env'`).files).toEqual(['/srv/app/.env'])
+  })
+})
