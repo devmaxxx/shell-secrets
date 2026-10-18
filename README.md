@@ -12,7 +12,7 @@
 [![bundle size](https://img.shields.io/bundlejs/size/shell-secrets)](https://bundlejs.com/?q=shell-secrets)
 [![license: MIT](https://img.shields.io/npm/l/shell-secrets)](./LICENSE)
 
-[Install](#install) · [Quick start](#quick-start) · [Detected secrets](#detected-secrets) · [API](#api) · [Recipes](#recipes) · [Compared](#compared-with-other-scanners)
+[Install](#install) · [Agent hooks](#agent-hooks) · [Quick start](#quick-start) · [Detected secrets](#detected-secrets) · [API](#api) · [Recipes](#recipes) · [Compared](#compared-with-other-scanners)
 
 </div>
 
@@ -20,14 +20,13 @@
   <img src="./demo/demo.gif" alt="The shell-secrets hook blocks a Bash call that writes a GitHub token into config.js and lets the same write through $GITHUB_TOKEN pass" width="800">
 </p>
 
-The [agent hook](#block-secrets-in-ai-agent-tool-calls) run on two tool calls; the token is a fake. Regenerate with `pnpm build && vhs demo/demo.tape`.
-
 <details>
 <summary><b>Table of contents</b></summary>
 
 - [Why](#why)
 - [Features](#features)
 - [Install](#install)
+- [Agent hooks](#agent-hooks)
 - [Quick start](#quick-start)
 - [Detected secrets](#detected-secrets)
 - [API](#api)
@@ -73,6 +72,94 @@ bun add shell-secrets
 ```
 
 Requires Node.js 22 or later.
+
+## Agent hooks
+
+The `shell-secrets` command installs a `PreToolUse` hook for [Claude Code](https://docs.anthropic.com/en/docs/claude-code/hooks) (`Bash`, `Write`, `Edit`, `MultiEdit`, `NotebookEdit`) or [Codex](https://developers.openai.com/codex/hooks) (`Bash`, `apply_patch`). It blocks a call that carries a new secret with exit code 2, which shows the masked finding to the agent.
+
+For Claude Code the hook is this entry in `settings.json`:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node '/path/to/shell-secrets/dist/cli.mjs' hook || exit 2",
+            "timeout": 10,
+            "statusMessage": "Scanning for secrets"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+One command writes it for you:
+
+```sh
+npx shell-secrets install claude
+```
+
+It writes to `~/.claude/settings.json`. The other forms:
+
+```sh
+npx shell-secrets install codex    # ~/.codex/hooks.json; then trust it once in /hooks
+npx shell-secrets install claude --project   # .claude/settings.json, runs the repo's devDependency
+npx shell-secrets uninstall claude
+```
+
+Installing again replaces the earlier entry and leaves other hooks alone. A project install runs `npx --no-install shell-secrets hook || exit 2`, so add the package as a devDependency there; without it the hook blocks every call rather than letting them run unchecked.
+
+### Examples
+
+What the hook does with tool calls an agent might make, in a repository whose `.gitignore` lists `.env` (`ghp_…` stands for a real token):
+
+| Tool call | Result |
+| --- | --- |
+| Bash `echo "GITHUB_TOKEN=ghp_…" >> config.js` | Blocked: the token lands in a tracked file |
+| Bash `export GITHUB_TOKEN=ghp_…` | Blocked: the token lands in the transcript |
+| Write `src/config.ts` with `export const token = "ghp_…"` | Blocked |
+| Bash `git commit -F msg.txt`, where `msg.txt` holds a token | Blocked: the message would be published |
+| Bash `echo "GITHUB_TOKEN=$GITHUB_TOKEN" >> config.js` | Passes: a variable reference, not a secret |
+| Bash `echo "GITHUB_TOKEN=ghp_…" >> .env` | Passes: `.env` is ignored and untracked |
+| Bash `echo "GITHUB_TOKEN=ghp_…" >> .env; cp .env config.js` | Blocked: the copy leaks it |
+
+A blocked call returns this to the agent, which then usually rewrites the call through the variable:
+
+```text
+Blocked by shell-secrets, the call contains a secret:
+GitHub token (ghp_********): use $GITHUB_TOKEN
+Reference it through an environment variable, or write it only to a gitignored file such as .env.
+```
+
+To try the hook without an agent, pipe it a tool call in the agent's JSON shape:
+
+```sh
+echo '{"tool_name":"Bash","tool_input":{"command":"echo \"TOKEN=$TOKEN\" >> config.js"}}' \
+  | npx shell-secrets hook; echo "exit $?"   # exit 0; a literal token gives exit 2
+```
+
+### What passes
+
+A secret is let through when it only lands in a file git ignores and does not track, such as `.env`: `echo "TOKEN=..." >> .env` passes, `... >> .env; cp .env config.js` does not, and neither does a write to an ignored name that is a symbolic or hard link. The files `git commit -F` and `gh --body-file` publish are scanned too, including one fed to `-F -` through `<` or `cat file |`, and so is a file `git add -f` forces past `.gitignore`; one the hook cannot read blocks the call, and so does one it cannot pin down, such as a message file filled by `cat .env >`. A forced add of a directory scans the ignored files in it. So does a tool call the hook cannot parse.
+
+### A hook of your own
+
+`checkToolCall` holds the same policy:
+
+```js
+import { checkToolCall } from 'shell-secrets'
+
+const findings = checkToolCall(
+  { kind: 'shell', command },
+  { isIgnored: path => isGitIgnored(path), readFile: path => readOrNull(path) },
+)
+```
 
 ## Quick start
 
@@ -239,32 +326,6 @@ A rule may also set:
 - `prepare(text)` to rewrite the text before matching. It must return a string of the same length, or `findSecrets` throws, because offsets would no longer point at the original text.
 
 ## Recipes
-
-### Block secrets in AI-agent tool calls
-
-The `shell-secrets` command installs a `PreToolUse` hook for [Claude Code](https://docs.anthropic.com/en/docs/claude-code/hooks) (`Bash`, `Write`, `Edit`, `MultiEdit`, `NotebookEdit`) or [Codex](https://developers.openai.com/codex/hooks) (`Bash`, `apply_patch`). It blocks a call that carries a new secret with exit code 2, which shows the masked finding to the agent.
-
-```sh
-npx shell-secrets install claude   # ~/.claude/settings.json
-npx shell-secrets install codex    # ~/.codex/hooks.json; then trust it once in /hooks
-npx shell-secrets install claude --project   # .claude/settings.json, runs the repo's devDependency
-npx shell-secrets uninstall claude
-```
-
-Installing again replaces the earlier entry and leaves other hooks alone. A project install runs `npx --no-install shell-secrets hook || exit 2`, so add the package as a devDependency there; without it the hook blocks every call rather than letting them run unchecked.
-
-A secret is let through when it only lands in a file git ignores and does not track, such as `.env`: `echo "TOKEN=..." >> .env` passes, `... >> .env; cp .env config.js` does not, and neither does a write to an ignored name that is a symbolic or hard link. The files `git commit -F` and `gh --body-file` publish are scanned too, including one fed to `-F -` through `<` or `cat file |`, and so is a file `git add -f` forces past `.gitignore`; one the hook cannot read blocks the call, and so does one it cannot pin down, such as a message file filled by `cat .env >`. A forced add of a directory scans the ignored files in it. So does a tool call the hook cannot parse.
-
-For a hook of your own, `checkToolCall` holds the same policy:
-
-```js
-import { checkToolCall } from 'shell-secrets'
-
-const findings = checkToolCall(
-  { kind: 'shell', command },
-  { isIgnored: path => isGitIgnored(path), readFile: path => readOrNull(path) },
-)
-```
 
 ### Pre-commit check on the staged diff
 
