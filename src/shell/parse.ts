@@ -238,18 +238,73 @@ export function scrubShell(cmd: string, keep: Keep = 'nothing'): string {
   return scrub(cmd, keep, MAX_QUOTED_PARTS)
 }
 
+// An open parenthesis the scan is inside of. `glue` is set for the kinds whose
+// output the shell joins to the surrounding word (`$(`, `<(`, `>(`); `sawCase`
+// records a `case` seen since it opened, whose pattern terminators `)` close
+// nothing.
+interface ParenFrame { glue: boolean, sawCase: boolean }
+
+// Applies a `)` to the stack and says whether it closed a word-gluing
+// substitution. A `case` pattern terminator closes nothing and reads as command
+// context, as does a `)` with no opener.
+function applyClose(stack: ParenFrame[]): boolean {
+  const top = stack[stack.length - 1]!
+  if (top.sawCase) {
+    return false
+  }
+  return stack.length > 1 ? stack.pop()!.glue : false
+}
+
 // `parts` is how many strings a substitution in a double-quoted string may be
 // joined from. A text that is read inside one is not joined again, so the
 // work stays a few passes over it.
 function scrub(cmd: string, keep: Keep, parts: number): string {
   const opaque = new RegExp(OPAQUE)
+  // Only a `)` directly before a `#` can make the comment reading depend on the
+  // parentheses, so the stack is tracked only when the line holds that pair.
+  const tracksParens = cmd.includes(')#')
+  const stack: ParenFrame[] = [{ glue: false, sawCase: false }]
+  const parenOrCase = /[()]|\bcase\b|\besac\b/g
+  const track = (from: number, to: number): void => {
+    parenOrCase.lastIndex = from
+    for (let g = parenOrCase.exec(cmd); g && g.index < to; g = parenOrCase.exec(cmd)) {
+      if (g[0] === '(') {
+        const prev = cmd[g.index - 1]
+        stack.push({ glue: prev === '$' || prev === '<' || prev === '>', sawCase: false })
+      }
+      else if (g[0] === ')') {
+        applyClose(stack)
+      }
+      else {
+        stack[stack.length - 1]!.sawCase = g[0] === 'case'
+      }
+    }
+  }
   let out = ''
   let copied = 0
+  let tracked = 0
   for (let m = opaque.exec(cmd); m; m = opaque.exec(cmd)) {
     const [all, opener, word] = m
     let replacement: string
     let end = m.index + all.length
-    if (opener === undefined && keep === 'nothing' && all.startsWith('"')) {
+    if (tracksParens) {
+      track(tracked, m.index)
+      tracked = m.index
+    }
+    if (opener === undefined && all === ')#') {
+      // A `#` glued to a `)`: a comment only where the `)` ends a command.
+      if (applyClose(stack)) {
+        replacement = ')'
+        end = m.index + 1
+      }
+      else {
+        const lineEnd = cmd.indexOf('\n', m.index)
+        end = lineEnd < 0 ? cmd.length : lineEnd
+        replacement = `)${' '.repeat(end - m.index - 1)}`
+      }
+      opaque.lastIndex = end
+    }
+    else if (opener === undefined && keep === 'nothing' && all.startsWith('"')) {
       const exposed = exposeQuoted(cmd, opaque, m, parts)
       replacement = exposed.text
       end = exposed.end
@@ -274,6 +329,7 @@ function scrub(cmd: string, keep: Keep, parts: number): string {
     }
     out += cmd.slice(copied, m.index) + replacement
     copied = end
+    tracked = end
   }
   return out + cmd.slice(copied)
 }

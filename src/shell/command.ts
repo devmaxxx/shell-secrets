@@ -2,7 +2,7 @@ import type { CommandFinding, CommandScan, ScanOptions } from '../types'
 import type { Segment } from './parse'
 import type { Publication, Script } from './publish'
 import { findSecrets } from '../scan/find'
-import { ASSIGNMENT_BEFORE, ASSIGNMENT_LOOKBEHIND, CHANGES_DIRECTORY, DEFINES_FUNCTION, EXPANDED_INLINE_INPUT, EXPANDS_VARIABLE, FILE_READER, HARMLESS_DEVICE, HARMLESS_REDIRECT, HEREDOC_INTO_CAT, IDENTITY_FROM_READER, INPUT_REDIRECT, LINE_COUNT, LITERAL_STDIN, MAX_COMMAND_LENGTH, MAX_SCRIPT_DEPTH, MAX_SEGMENT_TEXT, READING_SUBSTITUTION, READS_INTO_VARIABLE, REDIRECT, REDIRECT_OPERATOR, TEE } from './constants'
+import { ASSIGNMENT_BEFORE, ASSIGNMENT_LOOKBEHIND, CAT_PASSTHROUGH, CHANGES_DIRECTORY, DEFINES_FUNCTION, EXPANDED_INLINE_INPUT, EXPANDS_VARIABLE, FILE_READER, HARMLESS_DEVICE, HARMLESS_REDIRECT, HEREDOC_INTO_CAT, IDENTITY_FROM_READER, INPUT_REDIRECT, LINE_COUNT, LITERAL_STDIN, MAX_COMMAND_LENGTH, MAX_SCRIPT_DEPTH, MAX_SEGMENT_TEXT, READING_SUBSTITUTION, READS_INTO_VARIABLE, REDIRECT, REDIRECT_OPERATOR, TEE } from './constants'
 import { codeEnd, endOf, hasSubstitution, heredocAt, pairsOf, scrubShell, segments, skipBlanks, unquote, wordAt } from './parse'
 import { opaqueSubstitutionAt, printedTexts, publicationOf } from './publish'
 
@@ -191,14 +191,41 @@ function stdinSource(cmd: string, scrubbed: string, segment: Segment, inherited?
   return files.length > 0 ? publishes(files) : publishes([], [cmd.slice(previous.start, endOf(segment)).trim()])
 }
 
-// `echo 'git add -f .env' | bash` runs the echoed text. A script piped from a
-// file or a download is beyond what the command line shows.
-function pipedScript(cmd: string, scrubbed: string, stage: Segment, publication: Publication): Script[] {
-  const { before: previous } = stage
-  if (!publication.stdinScript || !isPipedFrom(scrubbed, stage, previous)) {
-    return []
+// A stage that hands its stdin on to the next unchanged, so a script printed
+// earlier in the pipe reaches the shell as written: a bare `cat`, or a `tee`,
+// which also copies it to a file.
+function passesStdinThrough(stage: Segment): boolean {
+  return CAT_PASSTHROUGH.test(stage.text) || TEE.test(stage.text)
+}
+
+interface Piped { scripts: Script[], writer: Segment | undefined, unresolved: string[] }
+
+// `echo 'git add -f .env' | bash` runs the echoed text, and pass-through stages
+// between the printer and the shell (`… | cat | bash`, `… | tee x | bash`)
+// leave it as written. A stage that rewrites the text (`sed`, `base64 -d`) hides
+// the real script, so it is unresolved and blocks; a pipe with no printer at its
+// head is a file or a download, beyond what the command line shows.
+function pipedScript(cmd: string, scrubbed: string, stage: Segment, publication: Publication): Piped {
+  const none: Piped = { scripts: [], writer: undefined, unresolved: [] }
+  if (!publication.stdinScript || !isPipedFrom(scrubbed, stage, stage.before)) {
+    return none
   }
-  return printedTexts(cmd, scrubbed, previous)
+  let transformed = false
+  for (let source = stage.before; source !== undefined; source = source.before) {
+    if (!passesStdinThrough(source)) {
+      const texts = printedTexts(cmd, scrubbed, source)
+      if (texts.length > 0) {
+        return transformed
+          ? { scripts: [], writer: source, unresolved: [cmd.slice(source.start, endOf(stage)).trim()] }
+          : { scripts: texts, writer: source, unresolved: [] }
+      }
+      transformed = true
+    }
+    if (!isPipedFrom(scrubbed, source, source.before)) {
+      return none
+    }
+  }
+  return none
 }
 
 const normalise = (path: string): string => path.replace(/^(?:\.\/)+/, '')
@@ -284,10 +311,12 @@ function messageFiles(cmd: string, scrubbed: string, all: readonly Segment[], de
     }
     let inherited: Published | undefined
     const stdinOf = (): Published => inherited ??= stdinSource(cmd, scrubbed, segment, stdin)
+    const piped = pipedScript(cmd, scrubbed, segment, publication)
+    published.unresolved.push(...piped.unresolved)
     // A script piped into a shell is that shell's stdin, so its own commands read nothing from the wrapper.
     const scripts = [
       ...publication.scripts.map(script => ({ script, stdin: stdinOf, writer: segment })),
-      ...pipedScript(cmd, scrubbed, segment, publication).map(script => ({ script, stdin: undefined, writer: segment.before! })),
+      ...piped.scripts.map(script => ({ script, stdin: undefined, writer: piped.writer! })),
     ]
     for (const { script, stdin: scriptStdin, writer } of scripts) {
       // The script's own text cannot show what a variable it reads was set to.

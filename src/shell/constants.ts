@@ -32,10 +32,16 @@ const PROCESS_ID = /\$\$/
 // character with it, so an escaped space cannot open one.
 const BEFORE_COMMENT = /[ \t\n;&|()]/
 
-// The `)` that closes a `$(…)` is part of its word, so `echo $(:)# x` prints
-// `# x`. Only a substitution with no parenthesis inside is told apart, and not
-// one that holds a `case`, whose pattern `y)` ends in a `)` that closes nothing.
-const COMMENT = /(?:^|[ \t\n;&|(]|\)(?<!\$\((?:(?!\bcase\b)[^()])*\)))#[^\n]*/
+// A `#` opens a comment at the start of a word. Not after a `)`: whether the
+// `)` ends a word there, so the `#` begins a new one, depends on what it closes,
+// which a parenthesis stack in `scrub` settles through COMMENT_GLUED.
+const COMMENT = /(?:^|[ \t\n;&|(])#[^\n]*/
+
+// A `#` glued to a `)`, matched short so a line of them that `scrub` reads as
+// text — each `)` closing a word-gluing `$(…)`, `<(…)` or `>(…)` — stays linear.
+// Where the `)` closes a subshell, an arithmetic command or a `case` pattern
+// instead, `scrub` blanks the comment body itself.
+const COMMENT_GLUED = /\)#/
 
 export const COMMENT_OPENER = new RegExp(`^${BEFORE_COMMENT.source}#`)
 
@@ -43,7 +49,7 @@ export const COMMENT_OPENER = new RegExp(`^${BEFORE_COMMENT.source}#`)
 // inside a heredoc body, a comment or the other kind of quote is not a quote,
 // and an escaped quote or space outside quotes opens nothing.
 export const OPAQUE = new RegExp(
-  [HEREDOC, PROCESS_ID, ANSI_C_QUOTED, DOUBLE_QUOTED, SINGLE_QUOTED, ESCAPED, COMMENT].map(r => r.source).join('|'),
+  [HEREDOC, PROCESS_ID, ANSI_C_QUOTED, DOUBLE_QUOTED, SINGLE_QUOTED, ESCAPED, COMMENT, COMMENT_GLUED].map(r => r.source).join('|'),
   'g',
 )
 
@@ -169,6 +175,10 @@ export const FILE_READER = new RegExp(`^\\s*${COMMAND_PREFIX}(?:cat|head|tail)(?
 
 export const HEREDOC_INTO_CAT = new RegExp(`^\\s*${COMMAND_PREFIX}cat(?:\\s+\\d?>>?\\s*\\S+)?\\s+<<-?[ \\t]*(?<word>${HEREDOC_WORD})`)
 
+// A `cat` that only forwards its stdin: no file operand but `-`, no heredoc and
+// no redirect, so a script printed earlier reaches the next stage as written.
+export const CAT_PASSTHROUGH = new RegExp(`^\\s*${COMMAND_PREFIX}cat(?:\\s+-)*\\s*$`)
+
 // A heredoc or here-string the shell expands: `$(cat .env)` in its body is read.
 // A quote or a backslash at the start of the delimiter keeps the body as it is.
 export const EXPANDED_INLINE_INPUT = /<<<|<<-?[ \t]*[^\s'"\\]/
@@ -261,6 +271,7 @@ export const GIT_GRAMMARS: Readonly<Record<string, Grammar>> = {
   'merge': { short: 'mFsX', long: [['file', 2, true], ['message', 2, true], ['strategy', 8, true], ['strategy-option', 10, true]], files: ['F', 'file'] },
   'update-index': { short: '', long: [['add', 2, false], ['stdin', 2, false], ['index-info', 2, false], ['cacheinfo', 2, true], ['chmod', 3, true]], files: [] },
   'hash-object': { short: 't', long: [['stdin', 5, false], ['stdin-paths', 7, false], ['type', 2, true], ['path', 2, true]], files: [] },
+  'stash': { short: 'm', long: [['message', 2, true]], files: [] },
 }
 
 const GH_BODY: Grammar = { short: 'aBbFHlmprtTR', long: [['body-file', 0, true], ['body', 0, true], ['title', 0, true], ['base', 0, true], ['head', 0, true], ['repo', 0, true]], files: ['F', 'body-file'] }
@@ -308,6 +319,41 @@ export const GH_GRAMMARS: Readonly<Record<string, Grammar>> = {
 
 // `gh api -F key=@file` uploads the file as the field's value.
 export const FIELD_FROM_FILE = /^[^=]*=@(.*)$/s
+
+// Commands that read a local file and send it off the machine: HTTP uploads,
+// copies to a remote host, and a raw network send.
+export const UPLOADERS = new Set(['curl', 'wget', 'http', 'https', 'httpie', 'scp', 'rsync', 'sftp', 'nc', 'ncat', 'netcat'])
+
+export const NETCATS = new Set(['nc', 'ncat', 'netcat'])
+
+// curl sends a file as the request body (`-d @f`, `--data-binary @f`,
+// `--data-urlencode name@f`), a form field (`-F k=@f` uploads it, `k=<f` reads
+// the field from it) or an upload (`-T f`, `--upload-file f`).
+export const CURL_GRAMMAR: Grammar = { short: 'dFT', long: [['data', 0, true], ['data-ascii', 0, true], ['data-binary', 0, true], ['data-raw', 0, true], ['data-urlencode', 0, true], ['form', 0, true], ['form-string', 0, true], ['upload-file', 0, true]], files: [] }
+
+// A `-d`/`--data*` value whose leading `@` names a file; `@-` is stdin.
+export const CURL_DATA_FILE = /^@(.*)$/s
+// `--data-urlencode name@file` or `@file`; the `=` forms send literal text.
+export const CURL_URLENCODE_FILE = /^[^=@]*@(.*)$/s
+// `-F field=@file` or `field=<file`, with an optional `;type=` tail of metadata.
+export const CURL_FORM_FILE = /^[^=]*=[@<]([^;]*)/
+
+// wget reads the request body from a file named outright.
+export const WGET_GRAMMAR: Grammar = { short: '', long: [['post-file', 0, true], ['body-file', 0, true]], files: ['post-file', 'body-file'] }
+
+// httpie options that take a value, so their arguments are not read as request
+// items; a file reaches it as `field@file`, `field=@file` or `field:=@file`.
+export const HTTPIE_GRAMMAR: Grammar = { short: 'ao', long: [['auth', 0, true], ['auth-type', 0, true], ['output', 0, true], ['session', 0, true], ['session-read-only', 0, true]], files: [] }
+export const HTTPIE_FILE = /^[\w.-]+(?::?=)?@(.*)$/s
+
+// scp and rsync options that take a value, so a destination or a source is not
+// read off one of them; only file-less flags are left to run together.
+export const SCP_GRAMMAR: Grammar = { short: 'cDFiJloPSX', long: [], files: [] }
+export const RSYNC_GRAMMAR: Grammar = { short: 'eTM', long: [['rsh', 0, true], ['files-from', 0, true]], files: [] }
+
+// A remote scp or rsync endpoint: `host:path`, `user@host:path`, or an
+// `rsync://` URL. A local path holds no colon before its first slash.
+export const REMOTE_TARGET = /^[^/]*:/
 
 // A substitution that only repeats text the command already holds.
 export const CAT_HEREDOC = /[ \t]*cat[ \t]+<</y

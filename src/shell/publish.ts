@@ -1,5 +1,5 @@
 import type { Heredoc, Segment } from './parse'
-import { ANSI_C_STRING, ARGUMENTS_FROM_STDIN, CAT_HEREDOC, CLOSING_PAREN, COMMAND_RUNNERS, ENV_VALUED_OPTION, FIELD_FROM_FILE, GH_ALIASES, GH_FIELD_OPTIONS, GH_GRAMMARS, GH_WRITES, GIT_GRAMMARS, GIT_PLACE_OPTION, GIT_VALUED_GLOBAL, IDENTITY_ASSIGNMENT, IDENTITY_CONFIG, LEADING_EXPANSIONS, LITERAL_ECHO, LOGIN_OPTION, MAX_COMMAND_CANDIDATES, REDIRECT_OPERATOR, RUNNER_COMMAND_OPTION, SHELL_COMMAND_OPTION, SHELL_STDIN_OPTION, SHELL_VALUED_LONG_OPTION, SHELLS, SPLIT_STRING_OPTION, WATCH_VALUED_OPTION } from './constants'
+import { ANSI_C_STRING, ARGUMENTS_FROM_STDIN, CAT_HEREDOC, CLOSING_PAREN, COMMAND_RUNNERS, CURL_DATA_FILE, CURL_FORM_FILE, CURL_GRAMMAR, CURL_URLENCODE_FILE, ENV_VALUED_OPTION, FIELD_FROM_FILE, GH_ALIASES, GH_FIELD_OPTIONS, GH_GRAMMARS, GH_WRITES, GIT_GRAMMARS, GIT_PLACE_OPTION, GIT_VALUED_GLOBAL, HTTPIE_FILE, HTTPIE_GRAMMAR, IDENTITY_ASSIGNMENT, IDENTITY_CONFIG, LEADING_EXPANSIONS, LITERAL_ECHO, LOGIN_OPTION, MAX_COMMAND_CANDIDATES, NETCATS, REDIRECT_OPERATOR, REMOTE_TARGET, RSYNC_GRAMMAR, RUNNER_COMMAND_OPTION, SCP_GRAMMAR, SHELL_COMMAND_OPTION, SHELL_STDIN_OPTION, SHELL_VALUED_LONG_OPTION, SHELLS, SPLIT_STRING_OPTION, UPLOADERS, WATCH_VALUED_OPTION, WGET_GRAMMAR } from './constants'
 import { afterContinuations, codeEnd, decodeEscapes, endOf, heredocAt, pairsOf, skipBlanks, unquote, wordAt } from './parse'
 
 type LongOption = readonly [name: string, shortestPrefix: number, valued: boolean]
@@ -74,6 +74,212 @@ function nameOf(cmd: string, word: Word): string {
 }
 
 const isFilledIn = (word: string): boolean => /[$`]/.test(word)
+
+// A brace pattern this wide is read as a glob that could name git or gh, since
+// a command name does not spread over so many alternatives.
+const MAX_BRACE_WORDS = 64
+
+// Reads the command word as a glob pattern, keeping its quoting: a backslash
+// escapes the quoted characters so a `*` inside quotes stays a literal filename
+// character rather than a wildcard.
+function globPattern(raw: string): string {
+  let out = ''
+  const literal = (text: string): void => {
+    for (const c of text) {
+      out += /[*?[\]{},\\]/.test(c) ? `\\${c}` : c
+    }
+  }
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw[i]!
+    if (c === '\\') {
+      if (i + 1 < raw.length) {
+        literal(raw[++i]!)
+      }
+    }
+    else if (c === '\'') {
+      const end = raw.indexOf('\'', i + 1)
+      literal(raw.slice(i + 1, end < 0 ? undefined : end))
+      i = end < 0 ? raw.length : end
+    }
+    else if (c === '$' && raw[i + 1] === '\'') {
+      ANSI_C_STRING.lastIndex = i
+      const ansi = ANSI_C_STRING.exec(raw)
+      literal(ansi ? unquote(ansi[0]) : raw.slice(i))
+      i = ansi ? ANSI_C_STRING.lastIndex - 1 : raw.length
+    }
+    else if (c === '"') {
+      let end = i + 1
+      while (end < raw.length && raw[end] !== '"') {
+        end += raw[end] === '\\' ? 2 : 1
+      }
+      literal(raw.slice(i + 1, end).replace(/\\(["\\$`])/g, '$1'))
+      i = end
+    }
+    else {
+      out += c
+    }
+  }
+  return out
+}
+
+// The brace-free alternatives a pattern expands to, or `null` when it would
+// spread past the bound: too many words, or nested deeper than that many could
+// reach. Only the first group on a path is split; the rest follow the recursion.
+function expandBraces(pattern: string): string[] | null {
+  const out: string[] = []
+  // A `{` that opens no group is scanned to the line's end, so a run of them is
+  // bounded too, not only the words and the nesting the recursion reaches.
+  let probes = 0
+  const expand = (prefix: string, rest: string, depth: number): boolean => {
+    if (out.length > MAX_BRACE_WORDS || depth > MAX_BRACE_WORDS || probes > MAX_BRACE_WORDS) {
+      return false
+    }
+    for (let i = 0; i < rest.length; i++) {
+      if (rest[i] === '\\') {
+        i++
+        continue
+      }
+      if (rest[i] === '{') {
+        probes++
+        const alternatives = braceAlternatives(rest, i)
+        if (alternatives) {
+          return alternatives.every(alt => expand(prefix + rest.slice(0, i), alt + rest.slice(alternatives.end), depth + 1))
+        }
+        if (probes > MAX_BRACE_WORDS) {
+          return false
+        }
+      }
+    }
+    out.push(prefix + rest)
+    return true
+  }
+  return expand('', pattern, 0) ? out : null
+}
+
+interface BraceAlternatives extends Array<string> { end: number }
+
+// The comma-separated alternatives of the brace group that opens at `open`, and
+// where it closes, or `null` when it is not a group (no comma, or unbalanced).
+function braceAlternatives(pattern: string, open: number): BraceAlternatives | null {
+  const parts: string[] = []
+  let depth = 0
+  let start = open + 1
+  for (let i = open; i < pattern.length; i++) {
+    const c = pattern[i]!
+    if (c === '\\') {
+      i++
+    }
+    else if (c === '{') {
+      depth++
+    }
+    else if (c === ',' && depth === 1) {
+      parts.push(pattern.slice(start, i))
+      start = i + 1
+    }
+    else if (c === '}' && --depth === 0) {
+      if (parts.length === 0) {
+        return null
+      }
+      parts.push(pattern.slice(start, i))
+      return Object.assign(parts, { end: i + 1 })
+    }
+  }
+  return null
+}
+
+// Whether the brace-free glob `pattern` matches the whole of `text`, with `*`,
+// `?`, `[…]` classes and backslash escapes. `text` is only ever `git` or `gh`.
+function globMatches(pattern: string, text: string): boolean {
+  let p = 0
+  let t = 0
+  let star = -1
+  let mark = 0
+  while (t < text.length) {
+    const c = pattern[p]
+    if (c === '\\' && p + 1 < pattern.length && pattern[p + 1] === text[t]) {
+      p += 2
+      t++
+    }
+    else if (c === '?') {
+      p++
+      t++
+    }
+    else if (c === '*') {
+      star = p++
+      mark = t
+    }
+    else if (c === '[') {
+      const next = matchClass(pattern, p, text[t]!)
+      if (next < 0) {
+        if (star < 0) {
+          return false
+        }
+        p = star + 1
+        t = ++mark
+      }
+      else {
+        p = next
+        t++
+      }
+    }
+    else if (c !== undefined && c !== '\\' && c !== '*' && c !== '?' && c !== '[' && c === text[t]) {
+      p++
+      t++
+    }
+    else if (star >= 0) {
+      p = star + 1
+      t = ++mark
+    }
+    else {
+      return false
+    }
+  }
+  while (pattern[p] === '*') {
+    p++
+  }
+  return p === pattern.length
+}
+
+// Reads the `[…]` class at `open` against `char`; returns the offset after the
+// `]` on a match, or -1. Supports `!`/`^` negation and `a-z` ranges.
+function matchClass(pattern: string, open: number, char: string): number {
+  let i = open + 1
+  const negated = pattern[i] === '!' || pattern[i] === '^'
+  if (negated) {
+    i++
+  }
+  let matched = false
+  for (let first = true; i < pattern.length && (first || pattern[i] !== ']'); first = false) {
+    if (pattern[i + 1] === '-' && pattern[i + 2] !== undefined && pattern[i + 2] !== ']') {
+      matched ||= char >= pattern[i]! && char <= pattern[i + 2]!
+      i += 3
+    }
+    else {
+      matched ||= char === pattern[i]
+      i++
+    }
+  }
+  return pattern[i] === ']' && matched !== negated ? i + 1 : -1
+}
+
+// Whether the command word, read unquoted as a glob with brace expansion, could
+// name git or gh. Scrubbing blanks quoted parts, so a `* ? [ {` still standing
+// in `scrubbed` was unquoted and is a wildcard; the pattern is read from `cmd`,
+// where the quoting tells a wildcard from a literal filename character. git and
+// gh are the only names that would publish, so only they are tested.
+function isGlobName(cmd: string, scrubbed: string, word: Word): boolean {
+  if (!/[*?[{]/.test(scrubbed.slice(word.at, word.end))) {
+    return false
+  }
+  const raw = cmd.slice(word.at, word.end)
+  const pattern = globPattern(raw.slice(LEADING_EXPANSIONS.exec(raw)?.[0].length ?? 0))
+  const base = pattern.slice(pattern.lastIndexOf('/') + 1)
+  const alternatives = expandBraces(base)
+  if (alternatives === null) {
+    return true
+  }
+  return alternatives.some(alt => globMatches(alt, 'git') || globMatches(alt, 'gh'))
+}
 
 const GH_GROUPS = new Set(Object.keys(GH_GRAMMARS).map(key => key.split(' ')[0]!))
 
@@ -215,6 +421,12 @@ function git(words: readonly Word[], fromStdin: boolean, text: string, guessed =
     publication.files.push(...(all ? ['.'] : parsed.operands))
     return publication
   }
+  // A stash publishes only through its message: `git stash [push] -m <msg>` or
+  // `git stash save <msg>`, like a commit message. Listing or popping does not.
+  if (sub === 'stash') {
+    const saves = parsed.operands[0] === 'save' && parsed.operands.length > 1
+    return has(parsed, 'm', 'message') || saves ? publication : NOTHING
+  }
   if (fromStdin)
     return { ...publication, unresolved: [text] }
   optionFiles(parsed, grammar, publication, text)
@@ -298,6 +510,68 @@ function gh(words: readonly Word[], fromStdin: boolean, text: string, guessed = 
     }
   }
   return publication
+}
+
+// The files curl sends: a request body, a form field or an upload, each from a
+// file the option's value points at. `@-` and `-T -` send stdin.
+function curlFiles(words: readonly Word[], publication: Publication, text: string): void {
+  for (const option of parse(words, CURL_GRAMMAR).options) {
+    const value = option.value ?? ''
+    const file
+      = option.name === 'data' || option.name === 'data-ascii' || option.name === 'data-binary' || option.name === 'd'
+        ? CURL_DATA_FILE.exec(value)?.[1]
+        : option.name === 'data-urlencode'
+          ? CURL_URLENCODE_FILE.exec(value)?.[1]
+          : option.name === 'form' || option.name === 'F'
+            ? CURL_FORM_FILE.exec(value)?.[1]
+            : option.name === 'upload-file' || option.name === 'T'
+              ? value
+              : undefined
+    if (file !== undefined)
+      addFile(file, publication, text)
+  }
+}
+
+// The local files a copy to a remote host sends: with a remote destination
+// last, every source that is not itself remote. A copy between local paths, or
+// one that only pulls down, sends nothing.
+function remoteFiles(words: readonly Word[], grammar: Grammar, publication: Publication, text: string): void {
+  const { operands } = parse(words, grammar)
+  if (operands.length < 2 || !REMOTE_TARGET.test(operands.at(-1)!))
+    return
+  for (const source of operands.slice(0, -1).filter(path => !REMOTE_TARGET.test(path)))
+    addFile(source, publication, text)
+}
+
+// A command that reads a file and sends it off the machine. Each file is
+// published as a message file is, so its contents are scanned and an ignored
+// one holding a secret still blocks; netcat sends its stdin, read as `-`.
+function uploaded(name: string, words: readonly Word[], text: string): Publication {
+  const publication: Publication = { ...NOTHING, publishes: true, files: [], unresolved: [] }
+  if (name === 'curl') {
+    curlFiles(words, publication, text)
+  }
+  else if (name === 'wget') {
+    const parsed = parse(words, WGET_GRAMMAR)
+    optionFiles(parsed, WGET_GRAMMAR, publication, text)
+  }
+  else if (name === 'http' || name === 'https' || name === 'httpie') {
+    for (const operand of parse(words, HTTPIE_GRAMMAR).operands) {
+      const file = HTTPIE_FILE.exec(operand)
+      if (file)
+        addFile(file[1], publication, text)
+    }
+  }
+  else if (name === 'scp') {
+    remoteFiles(words, SCP_GRAMMAR, publication, text)
+  }
+  else if (name === 'rsync') {
+    remoteFiles(words, RSYNC_GRAMMAR, publication, text)
+  }
+  else if (NETCATS.has(name)) {
+    addFile('-', publication, text)
+  }
+  return publication.files.length > 0 || publication.unresolved.length > 0 ? publication : NOTHING
 }
 
 // The shell that sets up a bare heredoc drops a backslash before `$`, a backquote
@@ -482,7 +756,7 @@ function closesSubstitution(scrubbed: string, at: number): boolean {
 // `$g`, `"$GIT"` or `$(which git)`: a name the shell fills in may be git or gh.
 const isFilledInName = (word: Word): boolean => isFilledIn(word.value.slice(word.value.lastIndexOf('/') + 1))
 
-const isCandidate = (name: string, word: Word): boolean => COMMANDS.has(name) || COMMAND_RUNNERS.has(name) || isFilledInName(word)
+const isCandidate = (name: string, word: Word): boolean => COMMANDS.has(name) || COMMAND_RUNNERS.has(name) || UPLOADERS.has(name) || isFilledInName(word)
 
 function tryCommand(cmd: string, spoken: Spoken, command: number, fromStdin: boolean, text: string): Publication {
   const { words, heredocs, hereStrings } = spoken
@@ -498,6 +772,9 @@ function tryCommand(cmd: string, spoken: Spoken, command: number, fromStdin: boo
   }
   if (name === 'gh') {
     return gh(rest, fromStdin, text)
+  }
+  if (UPLOADERS.has(name)) {
+    return uploaded(name, rest, text)
   }
   if (!COMMANDS.has(name)) {
     // `$g add -f .env` may run git or gh with the words that follow.
@@ -540,7 +817,7 @@ export function publicationOf(cmd: string, scrubbed: string, segment: Segment): 
   for (; command < words.length && tried < MAX_COMMAND_CANDIDATES; command++) {
     const name = nameOf(cmd, words[command]!)
     fromStdin ||= ARGUMENTS_FROM_STDIN.has(name)
-    if (!isCandidate(name, words[command]!)) {
+    if (!isCandidate(name, words[command]!) && !isGlobName(cmd, scrubbed, words[command]!)) {
       continue
     }
     tried++
@@ -555,7 +832,7 @@ export function publicationOf(cmd: string, scrubbed: string, segment: Segment): 
   // vanishes, as in `$a $b … git add -f .env`. A quoted one never vanishes.
   const untried = (word: Word): boolean => {
     const name = nameOf(cmd, word)
-    return COMMANDS.has(name) || COMMAND_RUNNERS.has(name) || (isFilledInName(word) && !/["']/.test(cmd.slice(word.at, word.end)))
+    return COMMANDS.has(name) || COMMAND_RUNNERS.has(name) || UPLOADERS.has(name) || isGlobName(cmd, scrubbed, word) || (isFilledInName(word) && !/["']/.test(cmd.slice(word.at, word.end)))
   }
   if (words.slice(command).some(untried)) {
     return unreadable(text)
