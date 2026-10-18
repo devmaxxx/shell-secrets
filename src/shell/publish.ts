@@ -159,15 +159,35 @@ function git(words: readonly Word[], fromStdin: boolean, text: string): Publicat
   return publication
 }
 
+// gh finds its subcommand past any flag, taking the word after a `-x` or a
+// `--name` as that flag's value, and the subcommand then reads every flag on
+// the line: `gh -R o/r pr create -F body` and `gh pr -R o/r create` both run
+// `pr create`.
+function ghCommandPath(words: readonly Word[]): number[] {
+  const path: number[] = []
+  for (let k = 0; k < words.length && path.length < 2; k++) {
+    const word = words[k]!.value
+    if (word === '--')
+      break
+    if (!word.startsWith('-'))
+      path.push(k)
+    else if (/^-[^-]$|^--[^=]+$/.test(word))
+      k++
+  }
+  return path
+}
+
 function gh(words: readonly Word[], fromStdin: boolean, text: string): Publication {
-  const [group = '', sub = ''] = words.map(w => w.value)
+  const path = ghCommandPath(words)
+  const [group = '', sub = ''] = path.map(k => words[k]!.value)
   const key = group === 'pr' || group === 'issue' || group === 'api' ? group : `${group} ${sub}`
   const grammar = GH_GRAMMARS[key]
   if (!grammar || ((key === 'pr' || key === 'issue') && !GH_WRITES.has(sub)))
     return NOTHING
   if (fromStdin)
     return { ...NOTHING, publishes: true, content: true, unresolved: [text] }
-  const parsed = parse(words.slice(key === group ? 1 : 2), grammar)
+  const named = key === group ? path.slice(0, 1) : path
+  const parsed = parse(words.filter((_, k) => !named.includes(k)), grammar)
   // `gh api` without a field or an input only reads.
   const content = key !== 'api' || has(parsed, 'F', 'f', 'field', 'raw-field', 'input')
   const publication: Publication = { ...NOTHING, publishes: true, content, files: [], unresolved: [] }

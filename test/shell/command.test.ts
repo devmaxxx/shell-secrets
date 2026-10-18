@@ -509,4 +509,17 @@ describe('words and commands as bash splits them', () => {
     for (const global of ['--attr-source HEAD', '--shallow-file x', '--namespace x', '--config-env a=B', '--attr-source=HEAD'])
       expect(scan(`git ${global} add -f .env`).files, global).toEqual(['.env'])
   })
+
+  it('finds the gh subcommand past flags before or between its words, as gh does', () => {
+    for (const cmd of [
+      'gh -R o/r pr create -F body',
+      'gh --repo o/r pr create -F body',
+      'gh --repo=o/r pr create -F body',
+      'gh pr -R o/r create -F body',
+      'gh -F body pr create',
+    ])
+      expect(scan(cmd).files, cmd).toEqual(['body'])
+    expect(scan('gh -R o/r release create v1 notes.md').files).toEqual(['notes.md'])
+    expect(scan('gh -R o/r pr view 4 -F body')).toEqual({ files: [], unresolved: [] })
+  })
 })
