@@ -489,4 +489,13 @@ describe('words and commands as bash splits them', () => {
     expect(scan(`git commit -m $'it\\'s' -m "$(cat .env)"`).unresolved).not.toEqual([])
     expect(scan(`git commit -m $'it\\'s $(cat .env)'`).unresolved).toEqual([])
   })
+
+  it('splits at a brace only where it stands as a word of its own', () => {
+    expect(scan('find . -name .env -exec git add -f {} +').files).toContain('{}')
+    expect(scan('git add -f {.env,x}').files).toEqual(['{.env,x}'])
+    expect(scan('cat .env | xargs -I{} git commit -m {}').unresolved).not.toEqual([])
+    expect(scan('X=$(cat .env); git commit -m ${X}').unresolved).not.toEqual([])
+    expect(scan('{ git add -f .env; }').files).toEqual(['.env'])
+    expect(scan('f() { git add -f .env;}').files).toEqual(['.env'])
+  })
 })

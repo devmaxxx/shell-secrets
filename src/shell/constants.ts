@@ -61,7 +61,10 @@ const WRAPPERS = [
 const COMMAND_PREFIX
   = `(?:(?:[A-Za-z_][A-Za-z0-9_]*=\\S*|${WRAPPERS}|then|do|else|elif|if|while|until|!)\\s+)*(?:[\\w./~-]*\\/)?`
 
-export const SEGMENT = /[^\n;&|(){}`]+/g
+// A brace opens or closes a group only as a word of its own. Inside a word
+// (`find -exec … {} +`, `${X}`, `{a,b}`) it is text, and cutting the segment
+// there would drop the arguments after it.
+export const SEGMENT = /(?:[^\n;&|(){}`]|(?<=[^\s;&|()`])[{}]|[{}](?=[^\s;&|()`]))+/g
 
 /**
  * A shell word starting at the sticky index: quoted parts, escapes and plain
