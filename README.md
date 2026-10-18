@@ -6,7 +6,6 @@
 
 [![npm version](https://img.shields.io/npm/v/shell-secrets?color=cb3837)](https://www.npmjs.com/package/shell-secrets)
 [![CI](https://github.com/devmaxxx/shell-secrets/actions/workflows/ci.yml/badge.svg)](https://github.com/devmaxxx/shell-secrets/actions/workflows/ci.yml)
-[![types](https://img.shields.io/npm/types/shell-secrets)](https://www.npmjs.com/package/shell-secrets)
 [![zero dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)](./package.json)
 [![bundle size](https://img.shields.io/bundlejs/size/shell-secrets)](https://bundlejs.com/?q=shell-secrets)
 [![license: MIT](https://img.shields.io/npm/l/shell-secrets)](./LICENSE)
