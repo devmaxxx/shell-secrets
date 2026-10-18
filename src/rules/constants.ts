@@ -62,4 +62,9 @@ export const CLASSES: [RegExp, number][] = [[/\d/, 10], [/[A-Z]/, 26], [/[a-z]/,
 // that reached the generic rule is a blob, not a credential typed in.
 export const MAX_JUDGED_LENGTH = 100
 
-export const SECRET_NAME = '(?:(?:api|access|auth|client|private|secret|signing|encryption|master|app|service)[_.-]?key|token|secret|passw(?:or)?d|pwd|credential)'
+// `pass` is a name unless a letter follows it: `DB_PASS`, `smtp.pass` and
+// `dbPass` are, `passport` and `passenger` are not. Nothing is asked of what
+// comes before it, since the `i` flag would read the `b` of `dbPass` as a
+// letter and lose a camelCase name that real configs use; `bypass` and
+// `compass` pay for that, and only when their value looks random.
+export const SECRET_NAME = '(?:(?:api|access|auth|client|private|secret|signing|encryption|master|app|service)[_.-]?key|token|secret|passw(?:or)?d|passphrase|pass(?![a-z])|pwd|credential)'

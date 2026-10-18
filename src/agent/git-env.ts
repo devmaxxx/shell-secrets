@@ -3,20 +3,33 @@ import { spawnSync } from 'node:child_process'
 import { lstatSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
-import { MAX_FORCED_FILES } from './constants'
+import { MAX_FILE_BYTES, MAX_FORCED_FILES, MAX_READ_BYTES, TIME_BUDGET_MS } from './constants'
 
 export function gitEnv(cwd: string): GuardEnv {
+  const deadline = Date.now() + TIME_BUDGET_MS
+  // Never 0: a timeout of 0 is no timeout.
+  const left = (): number => Math.max(1, deadline - Date.now())
+  const late = (): boolean => Date.now() >= deadline
+  let unread = MAX_READ_BYTES
   return {
     // check-ignore answers no for a tracked file and for a path outside any
     // repository, so only an untracked, ignored file counts. It does not follow
     // links, so the file a write would really land in is the one asked about.
     isIgnored: (path) => {
       const full = landsIn(resolve(cwd, path))
-      return full !== null && !isHardLinked(full) && spawnSync('git', ['-C', dirname(full), 'check-ignore', '-q', basename(full)]).status === 0
+      return full !== null && !isHardLinked(full) && !late()
+        && spawnSync('git', ['-C', dirname(full), 'check-ignore', '-q', basename(full)], { timeout: left() }).status === 0
     },
+    // A pipe or a device (`git commit -F /dev/zero`) never ends, so only a
+    // regular file within the size left to read is opened.
     readFile: (path) => {
       try {
-        return readFileSync(expand(cwd, path), 'utf8')
+        const file = expand(cwd, path)
+        const stat = statSync(file)
+        if (!stat.isFile() || stat.size > MAX_FILE_BYTES || stat.size > unread || late())
+          return null
+        unread -= stat.size
+        return readFileSync(file, 'utf8')
       }
       catch {
         return null
@@ -25,13 +38,13 @@ export function gitEnv(cwd: string): GuardEnv {
     listIgnored: (path) => {
       const dir = expand(cwd, path)
       try {
-        if (!statSync(dir).isDirectory())
+        if (!statSync(dir).isDirectory() || late())
           return null
       }
       catch {
         return null
       }
-      const listed = spawnSync('git', ['-C', dir, 'ls-files', '-z', '--others', '--ignored', '--exclude-standard'], { encoding: 'utf8', maxBuffer: 16 << 20 })
+      const listed = spawnSync('git', ['-C', dir, 'ls-files', '-z', '--others', '--ignored', '--exclude-standard'], { encoding: 'utf8', maxBuffer: 16 << 20, timeout: left() })
       const files = listed.status === 0 ? listed.stdout.split('\0').filter(Boolean) : null
       // A forced add of a dependency or build tree is too big to scan inside a
       // hook's time budget, so it stays blocked as unscanned.

@@ -60,6 +60,14 @@ describe('cli', () => {
     expect(run(['hook'], JSON.stringify({ tool_name: 'Write', tool_input: { file_path: 'a.js', content: { text: fake.github() } } }))).toBe(2)
   })
 
+  it('blocks a tool input or an edit list of the wrong shape instead of reading it as empty', () => {
+    const token = fake.github()
+    expect(run(['hook'], JSON.stringify({ tool_name: 'Bash', tool_input: `export T=${token}` }))).toBe(2)
+    expect(run(['hook'], JSON.stringify({ tool_name: 'MultiEdit', tool_input: { file_path: 'a.js', edits: { new_string: token } } }))).toBe(2)
+    expect(run(['hook'], JSON.stringify({ tool_name: 'MultiEdit', tool_input: { file_path: 'a.js', edits: [token] } }))).toBe(2)
+    expect(run(['hook'], JSON.stringify({ tool_name: 'MultiEdit', tool_input: { file_path: 'a.js' } }))).toBe(0)
+  })
+
   it('reads a payload larger than one pipe buffer from the built cli', () => {
     const cli = join(import.meta.dirname, '../../dist/cli.mjs')
     const payload = JSON.stringify({ tool_name: 'Write', tool_input: { file_path: 'a.js', content: `${'x\n'.repeat(40_000)}${fake.github()}` } })
@@ -120,6 +128,16 @@ describe('cli', () => {
     expect(add('git add -u -f')).toBe(0)
   })
 
+  it('blocks a message file it will not read instead of waiting on it', () => {
+    const repo = mkdtempSync(join(tmpdir(), 'ss-msg-'))
+    spawnSync('git', ['init', '-q', repo])
+    const commit = (path: string): number => run(['hook'], JSON.stringify({ tool_name: 'Bash', tool_input: { command: `git commit -F ${path}` }, cwd: repo }))
+    writeFileSync(join(repo, 'msg.txt'), 'fix: x\n')
+    expect(commit('msg.txt')).toBe(0)
+    if (process.platform !== 'win32')
+      expect(commit('/dev/zero')).toBe(2)
+  })
+
   it('passes a clean call and an unknown tool', () => {
     expect(run(['hook'], JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'ls' } }))).toBe(0)
     expect(run(['hook'], JSON.stringify({ tool_name: 'Read', tool_input: { file_path: 'x' } }))).toBe(0)
@@ -148,6 +166,22 @@ describe('cli', () => {
     writeFileSync(file, JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: `node '/opt/shell-secrets/cli.mjs' hook` }] }] } }))
     run(['install', 'claude'], '', home)
     expect(JSON.parse(readFileSync(file, 'utf8')).hooks.PreToolUse).toHaveLength(1)
+  })
+
+  it('refuses, and leaves the file as it is, when the settings are not an object it can extend', () => {
+    for (const text of ['null', '[]', '"x"', '{', '{"hooks": []}', '{"hooks": {"PreToolUse": {}}}']) {
+      const home = mkdtempSync(join(tmpdir(), 'ss-'))
+      const file = join(home, '.claude/settings.json')
+      mkdirSync(join(home, '.claude'))
+      writeFileSync(file, text)
+      logs.mockClear()
+      for (const command of ['install', 'uninstall']) {
+        expect(run([command, 'claude'], '', home), text).toBe(1)
+        expect(errors.mock.lastCall?.[0], text).toContain(file)
+      }
+      expect(readFileSync(file, 'utf8'), text).toBe(text)
+      expect(logs).not.toHaveBeenCalled()
+    }
   })
 
   it('writes the Codex matcher to hooks.json', () => {

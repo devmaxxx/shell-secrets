@@ -182,6 +182,12 @@ describe('a long value is judged by its start, and in linear time', () => {
     within(2000, p('-----BEGIN ', 'PRIVATE', ' KEY-----\\nA: b').repeat(20_000))
   })
 
+  it('scans a long run of assignments, and a long blob after one, in linear time', () => {
+    within(2000, 'a='.repeat(100_000))
+    within(2000, `=${'A'.repeat(31)}`.repeat(20_000))
+    within(2000, `KEY=${'QUFB'.repeat(50_000)}`)
+  })
+
   it('scans a long run of schemes that never reach a password in linear time', () => {
     within(2000, 'postgres://x?'.repeat(20_000))
   })
@@ -221,6 +227,20 @@ describe('a secret behind base64', () => {
     expect(ids(`echo ${b64(`export T=${fake.anthropic()}`)} | base64 -d >> ~/.zshrc`)).toEqual(['anthropic-api-key'])
   })
 
+  it('decodes a blob assigned with =, as in an .env file, a flag or a query string', () => {
+    const encoded = b64(`T ${fake.github()}`)
+    expect(ids(`DATA=${encoded}`)).toEqual(['github-token'])
+    expect(ids(`deploy --payload=${encoded}`)).toEqual(['github-token'])
+    expect(ids(`https://hooks.internal.io/in?d=${encoded}`)).toEqual(['github-token'])
+  })
+
+  it('previews a secret encoded twice by the secret, not by the layer between', () => {
+    const token = fake.github()
+    expect(findSecrets(b64(b64(token)))[0]!.preview).toBe(`${token.slice(0, 4)}********`)
+    const short = p('redis', '://default:', rand(16), '@cache.prod.internal')
+    expect(findSecrets(b64(b64(short)))[0]!.preview).toBe('********')
+  })
+
   it('passes over a blob that decodes to binary or to clean text', () => {
     expect(ids(`integrity: sha512-${rand(86, `${ALNUM}+/`)}==`)).toEqual([])
     expect(ids(b64('just an ordinary sentence with nothing secret in it'))).toEqual([])
@@ -257,6 +277,19 @@ describe('a secret-named value that is not a secret', () => {
     'a digest named by its suffix': `token_sha256 = "${rand(64, '0123456789abcdef')}"`,
     'a public key': `stripe_publishable_key: ${rand(32)}`,
     'a file named after a token': `"cloudflare_api_token.go": "${rand(64, '0123456789abcdef')}"`,
+    'a word that starts with pass': `passport = "${rand(28)}"`,
+    'a passphrase of words in XML': '<passphrase>correcthorsebatterystaple</passphrase>',
+    'a generic type before a method name': 'Promise<AccessToken> getAccessTokenForUser();',
+    'a mysql password prompt': 'mysql -h db.internal.io -u deploy -p shop',
+    'a mysql password from a variable': 'mysql -u deploy -p"$DB_PASSWORD" shop',
+    'a mysql stand-in password': 'mysql -uroot -proot',
+    'a docker port next to a mysql name': 'docker run --name mysql -p3306:3306 mysql:8',
+    'a mysql password from a substitution': p('mysql -u deploy -', 'p"$(cat /run/secrets/db)" shop'),
+    'a mysql password from a backquote': p('mysql -u deploy -', 'p`cat /run/secrets/db` shop'),
+    'a mysql password from an escaped variable': p('mysql -u deploy -', 'p$$DB_PASSWORD shop'),
+    'a mysql password from a batch variable': p('mysql -u deploy -', 'p%DB_PASSWORD% shop'),
+    'a mysql password from a template': p('mysql -u deploy -', 'p{db_password} shop'),
+    'a mysql password from a placeholder': p('mysql -u deploy -', 'p@DB_PASSWORD@ shop'),
   }
   for (const [name, text] of Object.entries(cases)) {
     it(`ignores ${name}`, () => {
@@ -295,6 +328,35 @@ describe('a secret-named value that is not a secret', () => {
     expect(ids(`password=${value.slice(0, 6)}!${value.slice(6, 12)}#${value.slice(12)}`)).toEqual(['generic-secret'])
   })
 
+  it('reads the other names a password goes by, and a password in XML', () => {
+    const value = rand(28)
+    for (const text of [
+      `DB_PASS=${value}`,
+      `pass=${value}`,
+      `dbPass=${value}`,
+      `smtp.pass: "${value}"`,
+      `passphrase: ${value}`,
+      `GPG_PASSPHRASE=${value}`,
+      `<password>${value}</password>`,
+      `<db.password>${value}</db.password>`,
+    ])
+      expect(ids(text), text).toEqual(['generic-secret'])
+    expect(ids(`mysqldump -uroot -p'${value}' shop`)).toEqual(['mysql-password'])
+  })
+
+  it('reads a mysql password wherever the client stands and however its line is broken', () => {
+    const value = rand(20)
+    for (const text of [
+      `mysql -p${value} shop`,
+      `/usr/bin/mysql -u root -p${value} shop`,
+      `bash -c "mysql -u root -p${value} shop"`,
+      `ssh db 'mysql -u root -p${value} shop'`,
+      `mysql -u root \\\n  -p${value} shop`,
+      `mysql \\\n-p${value} shop`,
+    ])
+      expect(ids(text), text).toEqual(['mysql-password'])
+  })
+
   it('keeps hundreds of thousands of findings without overflowing the stack', () => {
     const line = `API_TOKEN=${rand(32)}\n`
     expect(findSecrets(line.repeat(150_000))).toHaveLength(150_000)
@@ -324,6 +386,16 @@ describe('findNewSecrets: a secret the earlier text already holds', () => {
   it('does not hide a different secret of the same kind swapped in', () => {
     const swapped = findNewSecrets(`TOKEN=${token}`, `TOKEN=${fake.github()}`)
     expect(swapped.map(f => f.ruleId)).toEqual(['github-token'])
+  })
+
+  it('is not reported when its line moves, its key is renamed or a second copy appears', () => {
+    expect(findNewSecrets(`A=${token}\nB=1`, `B=1\nA=${token}`)).toEqual([])
+    expect(findNewSecrets(`A=${token}`, `B="${token}"`)).toEqual([])
+    expect(findNewSecrets(`A=${token}`, `A=${token}\nB=${token}`)).toEqual([])
+  })
+
+  it('does not hide a secret the edit extends past the one already there', () => {
+    expect(findNewSecrets(`A=${token}`, `A=${token}Zq9`).map(f => f.ruleId)).toEqual(['github-token'])
   })
 
   it('reports everything when the earlier text is empty', () => {

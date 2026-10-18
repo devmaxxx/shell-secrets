@@ -11,6 +11,9 @@ export const MARKER_WINDOW = 100
 // Below this a few leading characters are too large a share of the secret to show.
 export const MIN_LENGTH_TO_SHOW_PREFIX = 20
 
-export const BASE64_BLOB = /(?<![\w+/=-])[\w+/-]{32,}={0,2}(?![\w+/=-])/g
+// A `=` is padding, which only ever ends a blob, so one just before a run does
+// not make the run the tail of a longer blob: `KEY=blob` and `?d=blob` are
+// where encoded values sit.
+export const BASE64_BLOB = /(?<![\w+/-])[\w+/-]{32,}={0,2}(?![\w+/=-])/g
 
 export const PRINTABLE = /^[\t\n\r\x20-\x7E]*$/
