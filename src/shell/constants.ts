@@ -189,8 +189,8 @@ export const GH_GRAMMARS: Readonly<Record<string, Grammar>> = {
   'release create': GH_RELEASE,
   'release edit': GH_RELEASE,
   'release upload': { short: 'R', long: [['repo', 0, true]], files: [] },
-  'gist create': { short: 'df', long: [['desc', 0, true], ['filename', 0, true]], files: [] },
-  'gist edit': { short: 'adfr', long: [['add', 0, true], ['desc', 0, true], ['filename', 0, true], ['remove', 0, true]], files: ['a', 'add'] },
+  'gist create': { short: 'dfR', long: [['desc', 0, true], ['filename', 0, true], ['repo', 0, true]], files: [] },
+  'gist edit': { short: 'adfrR', long: [['add', 0, true], ['desc', 0, true], ['filename', 0, true], ['remove', 0, true], ['repo', 0, true]], files: ['a', 'add'] },
   // An Actions variable is plain text to anyone who can read the repository;
   // `gh secret set` is where a secret belongs, so it is left alone.
   'variable set': { short: 'befovrR', long: [['body', 0, true], ['env', 0, true], ['env-file', 0, true], ['org', 0, true], ['visibility', 0, true], ['repos', 0, true], ['repo', 0, true]], files: ['f', 'env-file'] },

@@ -480,6 +480,11 @@ describe('publishers the shell hides behind quoting, wrappers and substitutions'
       expect(scan(cmd), cmd).toEqual({ files: [], unresolved: [] })
   })
 
+  it('reads -R before gh gist as the repository, not a file', () => {
+    expect(scan('gh -R o/r gist create a.txt').files).toEqual(['a.txt'])
+    expect(scan('gh --repo o/r gist edit 1 -a a.txt').files).toEqual(['a.txt'])
+  })
+
   it('lets read-only gh calls use variables set by a substitution', () => {
     for (const cmd of [
       'export GH_TOKEN=$(gh auth token); R=o/r; gh api repos/$R/actions/runs --jq .total_count',
