@@ -1,6 +1,5 @@
 import type { Finding } from '../types'
 import { BASE64_BLOB, PRINTABLE } from './constants'
-import { redact } from './redact'
 
 /** Decodes standard or URL-safe base64; throws on anything else. */
 export function fromBase64(blob: string): string {
@@ -22,7 +21,8 @@ export function decodeBase64(blob: string): string | null {
 // secret encoded. A blob that decodes to binary (a key body, a hash) is passed
 // over; one that decodes to text is scanned like any text, nested encodings
 // included, and each level is three quarters the size of the one above. The
-// finding spans the encoded text.
+// finding spans the encoded text and keeps the preview of the secret itself,
+// which a nested level has already made from the innermost text.
 export function findEncoded(text: string, scan: (decoded: string) => Finding[]): Finding[] {
   const found: Finding[] = []
   for (const match of text.matchAll(BASE64_BLOB)) {
@@ -35,7 +35,6 @@ export function findEncoded(text: string, scan: (decoded: string) => Finding[]):
       name: `${inner.name}, base64-encoded`,
       start: match.index,
       end: match.index + match[0].length,
-      preview: redact(decoded.slice(inner.start, inner.end)),
     })
   }
   return found

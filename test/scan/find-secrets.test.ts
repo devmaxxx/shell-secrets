@@ -221,6 +221,13 @@ describe('a secret behind base64', () => {
     expect(ids(`echo ${b64(`export T=${fake.anthropic()}`)} | base64 -d >> ~/.zshrc`)).toEqual(['anthropic-api-key'])
   })
 
+  it('previews a secret encoded twice by the secret, not by the layer between', () => {
+    const token = fake.github()
+    expect(findSecrets(b64(b64(token)))[0]!.preview).toBe(`${token.slice(0, 4)}********`)
+    const short = p('redis', '://default:', rand(16), '@cache.prod.internal')
+    expect(findSecrets(b64(b64(short)))[0]!.preview).toBe('********')
+  })
+
   it('passes over a blob that decodes to binary or to clean text', () => {
     expect(ids(`integrity: sha512-${rand(86, `${ALNUM}+/`)}==`)).toEqual([])
     expect(ids(b64('just an ordinary sentence with nothing secret in it'))).toEqual([])
