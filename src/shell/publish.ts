@@ -190,8 +190,10 @@ function gh(words: readonly Word[], fromStdin: boolean, text: string): Publicati
     return { ...NOTHING, publishes: true, content: true, unresolved: [text] }
   const named = key === group ? path.slice(0, 1) : path
   const parsed = parse(words.filter((_, k) => !named.includes(k)), grammar)
-  // `gh api` without a field or an input only reads.
-  const content = key !== 'api' || has(parsed, 'F', 'f', 'field', 'raw-field', 'input')
+  // `gh api` without a field or an input only reads, and `gh workflow run`
+  // without one sends only the ref.
+  const fielded = key === 'api' || key === 'workflow run'
+  const content = !fielded || has(parsed, 'F', 'f', 'field', 'raw-field', 'input', 'json')
   const publication: Publication = { ...NOTHING, publishes: true, content, files: [], unresolved: [] }
   optionFiles(parsed, grammar, publication, text)
   // A release asset may carry a display label after `#`.
@@ -201,7 +203,12 @@ function gh(words: readonly Word[], fromStdin: boolean, text: string): Publicati
   // With no file named, `gh gist create` publishes its stdin.
   if (key === 'gist create')
     (parsed.operands.length > 0 ? parsed.operands : ['-']).forEach(path => addFile(path, publication, text))
-  if (key === 'api') {
+  // Without a body or an env file, `gh variable set` stores its stdin, and
+  // `gh workflow run --json` reads its inputs from stdin.
+  if ((key === 'variable set' && !has(parsed, 'b', 'body', 'f', 'env-file')) || (key === 'workflow run' && has(parsed, 'json'))) {
+    addFile('-', publication, text)
+  }
+  if (fielded) {
     for (const option of parsed.options.filter(o => o.name === 'F' || o.name === 'field')) {
       const file = FIELD_FROM_FILE.exec(option.value ?? '')
       if (file)

@@ -176,6 +176,10 @@ export const GIT_GRAMMARS: Readonly<Record<string, Grammar>> = {
 const GH_BODY: Grammar = { short: 'aBbFHlmprtTR', long: [['body-file', 0, true], ['body', 0, true], ['title', 0, true], ['base', 0, true], ['head', 0, true], ['repo', 0, true]], files: ['F', 'body-file'] }
 const GH_RELEASE: Grammar = { short: 'nFtR', long: [['notes-file', 0, true], ['notes', 0, true], ['title', 0, true], ['target', 0, true], ['repo', 0, true], ['discussion-category', 0, true], ['notes-start-tag', 0, true]], files: ['F', 'notes-file'] }
 
+// Calls that publish only the text on their own line, which is scanned with
+// it, or a substitution in it.
+const GH_TEXT: Grammar = { short: 'R', long: [['repo', 0, true]], files: [] }
+
 // The `gh pr` and `gh issue` subcommands that send text.
 export const GH_WRITES = new Set(['create', 'edit', 'comment', 'review', 'merge', 'close'])
 
@@ -187,6 +191,18 @@ export const GH_GRAMMARS: Readonly<Record<string, Grammar>> = {
   'release upload': { short: 'R', long: [['repo', 0, true]], files: [] },
   'gist create': { short: 'df', long: [['desc', 0, true], ['filename', 0, true]], files: [] },
   'gist edit': { short: 'adfr', long: [['add', 0, true], ['desc', 0, true], ['filename', 0, true], ['remove', 0, true]], files: ['a', 'add'] },
+  // An Actions variable is plain text to anyone who can read the repository;
+  // `gh secret set` is where a secret belongs, so it is left alone.
+  'variable set': { short: 'befovrR', long: [['body', 0, true], ['env', 0, true], ['env-file', 0, true], ['org', 0, true], ['visibility', 0, true], ['repos', 0, true], ['repo', 0, true]], files: ['f', 'env-file'] },
+  'workflow run': { short: 'FfrR', long: [['field', 0, true], ['raw-field', 0, true], ['ref', 0, true], ['json', 0, false], ['repo', 0, true]], files: [] },
+  'label create': GH_TEXT,
+  'label edit': GH_TEXT,
+  'repo create': GH_TEXT,
+  'repo edit': GH_TEXT,
+  'project create': GH_TEXT,
+  'project edit': GH_TEXT,
+  'project item-create': GH_TEXT,
+  'project item-edit': GH_TEXT,
   'api': { short: 'FfHXqtp', long: [['field', 0, true], ['raw-field', 0, true], ['header', 0, true], ['method', 0, true], ['input', 0, true], ['jq', 0, true], ['template', 0, true], ['preview', 0, true], ['hostname', 0, true], ['cache', 0, true]], files: ['input'] },
 }
 

@@ -450,6 +450,36 @@ describe('publishers the shell hides behind quoting, wrappers and substitutions'
     expect(scan('gh pr create -t title -b body').files).toEqual([])
   })
 
+  it('reads what gh variable set, workflow run, label, repo and project calls publish', () => {
+    for (const cmd of [
+      'gh variable set TOKEN < .env',
+      'cat .env | gh variable set TOKEN',
+      'gh variable set -f .env',
+      'gh variable set --env-file .env --repo o/r',
+      'gh workflow run deploy.yml -F config=@.env',
+      'gh workflow run deploy.yml --json < .env',
+    ])
+      expect(scan(cmd).files, cmd).toEqual(['.env'])
+    for (const cmd of [
+      'gh variable set TOKEN --body "$(cat .env)"',
+      'gh workflow run deploy.yml -f note="$(cat .env)"',
+      'gh label create leak -d "$(cat .env)"',
+      'gh label edit bug --description "$(cat .env)"',
+      'gh repo create o/r --description "$(cat .env)"',
+      'gh repo edit --homepage "$(cat .env)"',
+      'gh project item-create 1 --owner o --title t --body "$(cat .env)"',
+    ])
+      expect(scan(cmd).unresolved, cmd).not.toEqual([])
+    for (const cmd of [
+      'gh variable set REGION -b eu -e production',
+      'gh workflow run deploy.yml --ref "$(git branch --show-current)"',
+      'gh secret set TOKEN < .env',
+      'gh secret set -f .env',
+      'cat .env | gh secret set TOKEN',
+    ])
+      expect(scan(cmd), cmd).toEqual({ files: [], unresolved: [] })
+  })
+
   it('lets read-only gh calls use variables set by a substitution', () => {
     for (const cmd of [
       'export GH_TOKEN=$(gh auth token); R=o/r; gh api repos/$R/actions/runs --jq .total_count',
