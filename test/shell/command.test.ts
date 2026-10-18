@@ -469,3 +469,19 @@ describe('publishers the shell hides behind quoting, wrappers and substitutions'
     expect(performance.now() - started).toBeLessThan(2000)
   })
 })
+
+describe('words and commands as bash splits them', () => {
+  const scan = (cmd: string): { files: string[], unresolved: string[] } => {
+    const { messageFiles, unresolvedSources } = findSecretsInCommand(cmd)
+    return { files: messageFiles, unresolved: unresolvedSources }
+  }
+  const exactlyEnv = (path: string): boolean => path === '.env'
+
+  it('keeps a carriage return or a no-break space inside the word, where bash keeps it', () => {
+    expect(findSecretsInCommand('echo ok > .env\r').redirectTargets).toEqual(['.env\r'])
+    expect(findSecretsInCommand('echo ok >\u00A0.env').redirectTargets).toEqual(['\u00A0.env'])
+    expect(onlyWritesTo(`echo ${fake.github()} > .env\r`, exactlyEnv)).toBe(false)
+    expect(scan('git add -f .env\r').files).toEqual(['.env\r'])
+    expect(scan('gh pr create -F - <\r.env').files).toEqual(['\r.env'])
+  })
+})

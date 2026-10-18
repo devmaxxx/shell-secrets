@@ -63,10 +63,12 @@ export const SEGMENT = /[^\n;&|(){}`]+/g
 
 /**
  * A shell word starting at the sticky index: quoted parts, escapes and plain
- * characters run together until whitespace or an operator.
+ * characters run together until a blank, a newline or an operator. Only space
+ * and tab are blanks to bash: a `\r` or a no-break space is part of the word,
+ * so `> .env\r` writes a file that is not `.env`.
  */
 export const WORD = new RegExp(
-  `(?:${[ANSI_C_QUOTED, DOUBLE_QUOTED, SINGLE_QUOTED, ESCAPED].map(r => r.source).join('|')}|[^\\s"'|;&<>()\\\\])+`,
+  `(?:${[ANSI_C_QUOTED, DOUBLE_QUOTED, SINGLE_QUOTED, ESCAPED].map(r => r.source).join('|')}|[^ \\t\\n"'|;&<>()\\\\])+`,
   'y',
 )
 
@@ -76,7 +78,7 @@ export const HARMLESS_DEVICE = /^\/dev\/(?:null|zero|full|stdout|stderr|tty)$/
 
 // `>`, `>>`, `>|`, `&>`, `>&file` with an optional fd; `>&2` and `>&-` only
 // duplicate or close a descriptor and name no file.
-export const REDIRECT = /(?:\d+|&)?>(?:>|\||&(?![\d-]))?(?!&[\d-])\s*/g
+export const REDIRECT = /(?:\d+|&)?>(?:>|\||&(?![\d-]))?(?!&[\d-])[ \t]*/g
 
 export const TEE = new RegExp(`^\\s*${COMMAND_PREFIX}tee(?=\\s|$)`)
 
@@ -98,7 +100,7 @@ export const LITERAL_STDIN = new RegExp(`^\\s*${COMMAND_PREFIX}(?:echo|printf)(?
 
 export const CHANGES_DIRECTORY = new RegExp(`^\\s*${COMMAND_PREFIX}(?:cd|pushd|popd)(?=\\s|$)`)
 
-export const INPUT_REDIRECT = /(?<![<\d])\d?<(?![<(&])\s*/g
+export const INPUT_REDIRECT = /(?<![<\d])\d?<(?![<(&])[ \t]*/g
 
 // `head -n 5` and `tail -n +2` count lines; the count is not a file.
 export const LINE_COUNT = /^[+-]?\d+[bkm]?$/i
