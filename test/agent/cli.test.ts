@@ -60,6 +60,14 @@ describe('cli', () => {
     expect(run(['hook'], JSON.stringify({ tool_name: 'Write', tool_input: { file_path: 'a.js', content: { text: fake.github() } } }))).toBe(2)
   })
 
+  it('blocks a tool input or an edit list of the wrong shape instead of reading it as empty', () => {
+    const token = fake.github()
+    expect(run(['hook'], JSON.stringify({ tool_name: 'Bash', tool_input: `export T=${token}` }))).toBe(2)
+    expect(run(['hook'], JSON.stringify({ tool_name: 'MultiEdit', tool_input: { file_path: 'a.js', edits: { new_string: token } } }))).toBe(2)
+    expect(run(['hook'], JSON.stringify({ tool_name: 'MultiEdit', tool_input: { file_path: 'a.js', edits: [token] } }))).toBe(2)
+    expect(run(['hook'], JSON.stringify({ tool_name: 'MultiEdit', tool_input: { file_path: 'a.js' } }))).toBe(0)
+  })
+
   it('reads a payload larger than one pipe buffer from the built cli', () => {
     const cli = join(import.meta.dirname, '../../dist/cli.mjs')
     const payload = JSON.stringify({ tool_name: 'Write', tool_input: { file_path: 'a.js', content: `${'x\n'.repeat(40_000)}${fake.github()}` } })

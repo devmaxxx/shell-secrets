@@ -7,8 +7,7 @@ import { gitEnv } from './git-env'
 // in Codex's apply_patch, which carries a whole patch instead of one file.
 function toToolCall(tool: unknown, input: Record<string, unknown>): ToolCall | null {
   const text = (key: string, from = input): string => stringField(from, key)
-  const edits = Array.isArray(input.edits) ? input.edits.map(record) : []
-  const joined = (key: string): string => edits.map(edit => text(key, edit)).join('\n')
+  const joined = (key: string): string => editList(input).map(edit => text(key, edit)).join('\n')
   switch (tool) {
     case 'Bash':
       return { kind: 'shell', command: text('command') }
@@ -38,8 +37,21 @@ function stringField(input: Record<string, unknown>, key: string): string {
   return value
 }
 
-function record(value: unknown): Record<string, unknown> {
-  return typeof value === 'object' && value !== null ? value as Record<string, unknown> : {}
+// The same holds one level up: a `tool_input` sent as a string, or `edits` as
+// one object instead of a list, would read as nothing to check.
+function record(value: unknown, key: string): Record<string, unknown> {
+  if (value === undefined || value === null)
+    return {}
+  if (typeof value !== 'object' || Array.isArray(value))
+    throw new TypeError(`${key} is not an object`)
+  return value as Record<string, unknown>
+}
+
+function editList(input: Record<string, unknown>): Record<string, unknown>[] {
+  const edits = input.edits ?? []
+  if (!Array.isArray(edits))
+    throw new TypeError('edits is not a list')
+  return edits.map(edit => record(edit, 'edit'))
 }
 
 // Any exit other than 2 lets the call run, so a payload the hook cannot read
@@ -47,8 +59,8 @@ function record(value: unknown): Record<string, unknown> {
 export function runHook(stdin: () => string): number {
   let findings
   try {
-    const payload = record(JSON.parse(stdin()))
-    const call = toToolCall(payload.tool_name, record(payload.tool_input))
+    const payload = record(JSON.parse(stdin()), 'payload')
+    const call = toToolCall(payload.tool_name, record(payload.tool_input, 'tool_input'))
     if (!call)
       return 0
     findings = checkToolCall(call, gitEnv(typeof payload.cwd === 'string' ? payload.cwd : process.cwd()))
