@@ -182,6 +182,12 @@ describe('a long value is judged by its start, and in linear time', () => {
     within(2000, p('-----BEGIN ', 'PRIVATE', ' KEY-----\\nA: b').repeat(20_000))
   })
 
+  it('scans a long run of assignments, and a long blob after one, in linear time', () => {
+    within(2000, 'a='.repeat(100_000))
+    within(2000, `=${'A'.repeat(31)}`.repeat(20_000))
+    within(2000, `KEY=${'QUFB'.repeat(50_000)}`)
+  })
+
   it('scans a long run of schemes that never reach a password in linear time', () => {
     within(2000, 'postgres://x?'.repeat(20_000))
   })
@@ -338,6 +344,16 @@ describe('findNewSecrets: a secret the earlier text already holds', () => {
   it('does not hide a different secret of the same kind swapped in', () => {
     const swapped = findNewSecrets(`TOKEN=${token}`, `TOKEN=${fake.github()}`)
     expect(swapped.map(f => f.ruleId)).toEqual(['github-token'])
+  })
+
+  it('is not reported when its line moves, its key is renamed or a second copy appears', () => {
+    expect(findNewSecrets(`A=${token}\nB=1`, `B=1\nA=${token}`)).toEqual([])
+    expect(findNewSecrets(`A=${token}`, `B="${token}"`)).toEqual([])
+    expect(findNewSecrets(`A=${token}`, `A=${token}\nB=${token}`)).toEqual([])
+  })
+
+  it('does not hide a secret the edit extends past the one already there', () => {
+    expect(findNewSecrets(`A=${token}`, `A=${token}Zq9`).map(f => f.ruleId)).toEqual(['github-token'])
   })
 
   it('reports everything when the earlier text is empty', () => {

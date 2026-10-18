@@ -138,6 +138,16 @@ describe('checkToolCall', () => {
     expect(ids({ kind: 'patch', patch }, env())).toEqual(['github-token'])
   })
 
+  it('exempts a patch that moves a tracked file into an ignored one, CRLF line ends included', () => {
+    const token = fake.github()
+    const moved = ['*** Update File: config.js', '*** Move to: .env', '@@', `+${token}`].join('\n')
+    expect(ids({ kind: 'patch', patch: moved }, env())).toEqual([])
+    const crlf = ['*** Begin Patch', '*** Add File: .env', `+${token}`, '*** End Patch'].join('\r\n')
+    expect(ids({ kind: 'patch', patch: crlf }, env())).toEqual([])
+    const both = ['*** Begin Patch', '*** Add File: .env', `+${token}`, '*** Add File: config.js', `+${token}`, '*** End Patch'].join('\r\n')
+    expect(ids({ kind: 'patch', patch: both }, env())).toEqual(['github-token'])
+  })
+
   it('reads an indented patch header as Codex does, and an indented line in an Update hunk as context', () => {
     const token = fake.github()
     for (const indent of ['  ', '\t']) {
