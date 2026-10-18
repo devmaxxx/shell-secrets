@@ -5,7 +5,6 @@
 **Catch a secret in a shell command or an AI-agent tool call before it runs — written to a file, exported, or put in a commit message. Zero dependencies.**
 
 [![npm version](https://img.shields.io/npm/v/shell-secrets?color=cb3837)](https://www.npmjs.com/package/shell-secrets)
-[![npm downloads](https://img.shields.io/npm/dm/shell-secrets)](https://www.npmjs.com/package/shell-secrets)
 [![CI](https://github.com/devmaxxx/shell-secrets/actions/workflows/ci.yml/badge.svg)](https://github.com/devmaxxx/shell-secrets/actions/workflows/ci.yml)
 [![types](https://img.shields.io/npm/types/shell-secrets)](https://www.npmjs.com/package/shell-secrets)
 [![zero dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)](./package.json)
