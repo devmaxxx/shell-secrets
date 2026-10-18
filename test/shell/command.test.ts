@@ -504,4 +504,9 @@ describe('words and commands as bash splits them', () => {
       expect(scan(`set -- $(cat .env); git commit -m "${param}"`).unresolved, param).not.toEqual([])
     expect(scan('set -- a b; git commit -m "$1"').unresolved).toEqual([])
   })
+
+  it('skips the separate value of each git global option that takes one', () => {
+    for (const global of ['--attr-source HEAD', '--shallow-file x', '--namespace x', '--config-env a=B', '--attr-source=HEAD'])
+      expect(scan(`git ${global} add -f .env`).files, global).toEqual(['.env'])
+  })
 })

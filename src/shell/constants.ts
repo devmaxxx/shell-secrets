@@ -133,7 +133,7 @@ export const SHELL_COMMAND_OPTION = /^-[A-Zabd-z]*c[A-Za-z]*$/
 // Global options that point git at another repository or work tree.
 export const GIT_PLACE_OPTION = /^(?:-C|--git-dir|--work-tree)(?:=|$)/
 
-export const GIT_VALUED_GLOBAL = /^(?:-[Cc]|--(?:git-dir|work-tree|namespace|super-prefix|config-env))$/
+export const GIT_VALUED_GLOBAL = /^(?:-[Cc]|--(?:git-dir|work-tree|namespace|super-prefix|config-env|attr-source|shallow-file))$/
 
 /**
  * The git and gh subcommands that publish content, and the options that
