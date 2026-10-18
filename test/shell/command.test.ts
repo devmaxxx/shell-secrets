@@ -498,4 +498,10 @@ describe('words and commands as bash splits them', () => {
     expect(scan('{ git add -f .env; }').files).toEqual(['.env'])
     expect(scan('f() { git add -f .env;}').files).toEqual(['.env'])
   })
+
+  it('counts a positional parameter set from a substitution as hidden content', () => {
+    for (const param of ['$1', '$*', '$@', '${2}'])
+      expect(scan(`set -- $(cat .env); git commit -m "${param}"`).unresolved, param).not.toEqual([])
+    expect(scan('set -- a b; git commit -m "$1"').unresolved).toEqual([])
+  })
 })

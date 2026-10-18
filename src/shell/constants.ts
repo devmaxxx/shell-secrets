@@ -179,6 +179,7 @@ export const LITERAL_ECHO = /[ \t]*(?:echo|printf)(?:[ \t][^\n$`()<>|;&\\'"]*)?\
 
 export const CLOSING_PAREN = /\s*\)/y
 
-export const EXPANDS_VARIABLE = /\$[A-Z_{]/i
+// `set -- $(cat .env)` fills the positional parameters as surely as `k=$(…)` fills a name.
+export const EXPANDS_VARIABLE = /\$[\w{@*]/
 
 export const READS_INTO_VARIABLE = /(?:^|[\s;&|(])(?:read|mapfile|readarray)\s/
