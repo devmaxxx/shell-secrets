@@ -494,12 +494,18 @@ describe('hostile command lines, in linear time', () => {
   // run says nothing about the parser; these stay just under the gate.
   const sized = (unit: string, head = '', tail = ''): string =>
     head + unit.repeat(Math.floor((MAX_COMMAND_LENGTH - head.length - tail.length) / unit.length)) + tail
+  // Best of three: a cold first call on a busy CI runner can take several times
+  // longer than the scan itself, while a quadratic scan is slow on every run.
   const within = (ms: number, cmd: string): void => {
     expect(cmd.length).toBeLessThanOrEqual(MAX_COMMAND_LENGTH)
-    const started = performance.now()
-    findSecretsInCommand(cmd)
-    onlyWritesTo(cmd, () => true)
-    expect(performance.now() - started).toBeLessThan(ms)
+    let best = Infinity
+    for (let run = 0; run < 3 && best >= ms; run++) {
+      const started = performance.now()
+      findSecretsInCommand(cmd)
+      onlyWritesTo(cmd, () => true)
+      best = Math.min(best, performance.now() - started)
+    }
+    expect(best).toBeLessThan(ms)
   }
 
   it('scans a long run of unterminated heredocs', () => {
