@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="docs/assets/logo.svg" width="96" height="96" alt="">
+
 # shell-secrets
 
 **Catch a secret in a shell command or an AI-agent tool call before it runs — written to a file, exported, or put in a commit message. Zero dependencies.**
