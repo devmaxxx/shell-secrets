@@ -17,19 +17,28 @@ function runnablePattern(pattern: RegExp): RegExp {
   return compiled
 }
 
-function prepared(rule: Rule, text: string): string {
+// Rules that share a `prepare` read the same subject, so it is made once per
+// scan: a big file would otherwise pay for it once per rule, which put one
+// 16 MiB file of `${` past the time the hook has.
+type Subjects = Map<NonNullable<Rule['prepare']>, string>
+
+function prepared(rule: Rule, text: string, subjects: Subjects): string {
   if (!rule.prepare) {
     return text
   }
-  const subject = rule.prepare(text)
-  if (subject.length !== text.length) {
-    throw new Error(`shell-secrets: rule "${rule.id}" prepare() changed the text's length, so offsets would be wrong`)
+  let subject = subjects.get(rule.prepare)
+  if (subject === undefined) {
+    subject = rule.prepare(text)
+    if (subject.length !== text.length) {
+      throw new Error(`shell-secrets: rule "${rule.id}" prepare() changed the text's length, so offsets would be wrong`)
+    }
+    subjects.set(rule.prepare, subject)
   }
   return subject
 }
 
-function scanRule(rule: Rule, text: string): Finding[] {
-  const subject = prepared(rule, text)
+function scanRule(rule: Rule, text: string, subjects: Subjects): Finding[] {
+  const subject = prepared(rule, text, subjects)
   const group = rule.secretGroup ?? 0
   const found: Finding[] = []
   for (const match of subject.matchAll(runnablePattern(rule.pattern))) {
@@ -72,7 +81,8 @@ export function findSecrets(text: string, options: ScanOptions = {}): Finding[] 
     return []
   }
   const rules = options.rules ?? defaultRules
-  const found = rules.filter(rule => !rule.fallback).flatMap(rule => scanRule(rule, text))
+  const subjects: Subjects = new Map()
+  const found = rules.filter(rule => !rule.fallback).flatMap(rule => scanRule(rule, text, subjects))
   const keep = (fresh: Finding[]): void => {
     const overlaps = overlapIndex(found)
     // One push per finding: spreading a six-figure array overflows the stack.
@@ -83,7 +93,7 @@ export function findSecrets(text: string, options: ScanOptions = {}): Finding[] 
   }
   keep(findEncoded(text, decoded => findSecrets(decoded, { rules })))
   for (const rule of rules.filter(rule => rule.fallback))
-    keep(scanRule(rule, text))
+    keep(scanRule(rule, text, subjects))
   return found.sort((a, b) => a.start - b.start)
 }
 

@@ -184,6 +184,19 @@ describe('cli', () => {
     }
   })
 
+  it('writes the hook in when hooks or PreToolUse is null, treating it as absent', () => {
+    for (const text of ['{"hooks": null}', '{"hooks": {"PreToolUse": null}}', '{"other": 1, "hooks": null}']) {
+      const home = mkdtempSync(join(tmpdir(), 'ss-'))
+      const file = join(home, '.claude/settings.json')
+      mkdirSync(join(home, '.claude'))
+      writeFileSync(file, text)
+      expect(run(['install', 'claude'], '', home), text).toBe(0)
+      const written = JSON.parse(readFileSync(file, 'utf8'))
+      expect(written.hooks.PreToolUse, text).toHaveLength(1)
+      expect(written.hooks.PreToolUse[0].hooks[0].command, text).toBe(`node '/opt/shell-secrets/cli.mjs' hook || exit 2`)
+    }
+  })
+
   it('writes the Codex matcher to hooks.json', () => {
     const home = mkdtempSync(join(tmpdir(), 'ss-'))
     run(['install', 'codex'], '', home)

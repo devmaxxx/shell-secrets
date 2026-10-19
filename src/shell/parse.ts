@@ -1,4 +1,4 @@
-import { BLANKS, COMMENT_OPENER, HEREDOC_DELIMITER, LINE_PIECE, MAX_QUOTED_PARTS, MAX_SCRIPT_DEPTH, OPAQUE, SEGMENT, WORD } from './constants'
+import { BLANKS, COMMENT_OPENER, HEREDOC_DELIMITER, LINE_PIECE, MAX_HEREDOC_DEPTH, MAX_QUOTED_PARTS, MAX_SCRIPT_DEPTH, OPAQUE, SEGMENT, WORD } from './constants'
 
 const blank = (text: string): string => '_'.repeat(text.length)
 
@@ -36,10 +36,22 @@ function substitutionAt(text: string): number {
   return -1
 }
 
+/** A heredoc whose terminator is not in the text that was read. */
+interface Unterminated {
+  readonly word: string
+  readonly stripsTabs: boolean
+  /** Where its body starts: the line after the header. */
+  readonly bodyAt: number
+}
+
 interface Exposed {
   readonly text: string
-  /** A substitution is left without its closing parenthesis or backquote. */
+  /** A substitution is left without its closing parenthesis or backquote, or a heredoc in it without its terminator. */
   readonly open: boolean
+  /** That heredoc, its `bodyAt` counted from the start of the string. */
+  readonly heredoc?: Unterminated | undefined
+  /** The parentheses left open, when the caller keeps track of them. */
+  readonly frames?: readonly ParenFrame[] | undefined
 }
 
 // The shell runs a substitution inside double quotes, and what is in it is
@@ -51,15 +63,20 @@ interface Exposed {
 // A substitution left open has its opener turned into a `;`: the commands in
 // it are read to the end of the string, and no parenthesis is left to pair
 // with a later one.
-function exposeSubstitutions(quoted: string): Exposed {
+function exposeSubstitutions(quoted: string, tracks = false, heredocs = 0): Exposed {
   const inside = quoted.slice(1, -1)
   const first = substitutionAt(inside)
   if (first < 0) {
     return { text: blank(quoted), open: false }
   }
-  const code = scrub(inside.slice(first), 'nothing', 0)
+  const unterminated: Unterminated[] = []
+  const stack = tracks ? [baseFrame()] : undefined
+  const code = scrub(inside.slice(first), 'nothing', 0, { unterminated, stack, heredocs })
   let out = ''
-  let depth = 0
+  // The substitution being walked is the frame above the base; a `case`
+  // pattern's `)` closes nothing, so counting the parentheses would end it early.
+  const parens: ParenFrame[] = [baseFrame()]
+  const track = parenTracker(code, parens)
   let backquoted = false
   let opened = 0
   for (let i = 0; i < code.length; i++) {
@@ -67,13 +84,15 @@ function exposeSubstitutions(quoted: string): Exposed {
     if (backquoted) {
       backquoted = char !== '`'
     }
-    else if (depth > 0) {
-      depth += char === '(' ? 1 : char === ')' ? -1 : 0
+    else if (parens.length > 1) {
+      track(i, i + 1)
     }
     else if (char === '`' || (char === '$' && code[i + 1] === '(')) {
       opened = out.length
       backquoted = char === '`'
-      depth = backquoted ? 0 : 1
+      if (!backquoted) {
+        parens.push({ glue: true, cases: 0, at: i + 1 })
+      }
       out += backquoted ? char : '$('
       i += backquoted ? 0 : 1
       continue
@@ -84,11 +103,26 @@ function exposeSubstitutions(quoted: string): Exposed {
     }
     out += char
   }
-  const open = depth > 0 || backquoted
-  if (open) {
+  const unclosed = parens.length > 1 || backquoted
+  if (unclosed) {
     out = out.slice(0, opened) + (backquoted ? ';' : '_;') + out.slice(opened + (backquoted ? 1 : 2))
   }
-  return { text: `_${blank(inside.slice(0, first))}${out}_`, open }
+  const heredoc = unterminated[0]
+  return {
+    text: `_${blank(inside.slice(0, first))}${out}_`,
+    open: unclosed || heredoc !== undefined,
+    heredoc: heredoc && { ...heredoc, bodyAt: 1 + first + heredoc.bodyAt },
+    frames: stack?.slice(1),
+  }
+}
+
+const THROUGH_QUOTE = /(?:[^"\\]|\\[\s\S])*"/y
+
+// The offset of the next `"` that no backslash escapes, from `from` on, or -1.
+function quoteAfter(cmd: string, from: number): number {
+  THROUGH_QUOTE.lastIndex = from
+  const found = THROUGH_QUOTE.exec(cmd)
+  return found ? found.index + found[0].length - 1 : -1
 }
 
 // A string ends at its next `"`, so one that holds a quoted word of its own,
@@ -97,24 +131,52 @@ function exposeSubstitutions(quoted: string): Exposed {
 // open the next string is joined to it and the whole is read again; when none
 // closes it, the first stands alone, as the rest of the line would otherwise
 // be read as the inside of a string.
-function exposeQuoted(cmd: string, opaque: RegExp, first: RegExpExecArray, parts: number): { text: string, end: number } {
-  const alone = exposeSubstitutions(first[0])
+//
+// The quotes are found by hand, not as tokens of the line: the first string
+// ends at the quote that opens the word, whose text up to its own closing quote
+// is plain text, so a `#`, a backslash or a `$$` in it is no comment, escape or
+// process id, and a `)#` there hides nothing. Each step takes that closing
+// quote and the one after it.
+//
+// A heredoc in the substitution is the exception: its body is text whatever
+// quotes and parentheses it holds, so the string is read to the first `"`
+// after the terminator instead of being joined from the pieces the body's
+// quotes cut it into. `lines` is given where that may be tried, and `tried`
+// says how far it reached.
+//
+// When none of this closes the substitution, `frames` are the parentheses the
+// first string leaves open, which the caller's stack must hold for the `)`
+// that closes them.
+function exposeQuoted(cmd: string, opaque: RegExp, first: RegExpExecArray, parts: number, tracks: boolean, heredocs: number, lines?: () => Lines): { text: string, end: number, tried?: number, frames?: readonly ParenFrame[] | undefined } {
+  const alone = exposeSubstitutions(first[0], tracks, heredocs)
   const end = first.index + first[0].length
   if (!alone.open) {
     return { text: alone.text, end }
   }
+  const through = alone.heredoc && lines && endPastHeredoc(lines(), alone.heredoc, first.index)
+  if (through !== undefined) {
+    const whole = exposeSubstitutions(cmd.slice(first.index, through), false, heredocs)
+    if (!whole.open) {
+      opaque.lastIndex = through
+      return { text: whole.text, end: through }
+    }
+  }
+  let at = end
   for (let joined = 1; joined < parts; joined++) {
-    const next = opaque.exec(cmd)
-    if (!next?.[0].startsWith('"')) {
+    const closesWord = quoteAfter(cmd, at)
+    const opensNext = closesWord < 0 ? -1 : quoteAfter(cmd, closesWord + 1)
+    if (opensNext < 0) {
       break
     }
-    const whole = exposeSubstitutions(cmd.slice(first.index, next.index + next[0].length))
+    at = opensNext + 1
+    const whole = exposeSubstitutions(cmd.slice(first.index, at), false, heredocs)
     if (!whole.open) {
-      return { text: whole.text, end: next.index + next[0].length }
+      opaque.lastIndex = at
+      return { text: whole.text, end: at }
     }
   }
   opaque.lastIndex = end
-  return { text: alone.text, end }
+  return { text: alone.text, end, tried: through, frames: alone.frames }
 }
 
 // A script nests at most `MAX_SCRIPT_DEPTH` deep, so this holds the texts it is inside of.
@@ -150,6 +212,8 @@ interface Lines {
   readonly newlines: readonly number[]
   /** Where the quotes and backslashes stand: the only way a line goes on past its newline. */
   readonly carriers: readonly number[]
+  /** Where the double quotes stand that no backslash makes plain. */
+  readonly quotes: readonly number[]
 }
 
 /**
@@ -190,7 +254,17 @@ const linesOf = remember((cmd): Lines => {
   for (const m of cmd.matchAll(/[\\'"]/g)) {
     carriers.push(m.index)
   }
-  return { exact, tabbed, newlines, carriers }
+  const quotes: number[] = []
+  for (let i = 0; i < carriers.length; i++) {
+    const at = carriers[i]!
+    if (cmd[at] === '"') {
+      quotes.push(at)
+    }
+    else if (cmd[at] === '\\' && carriers[i + 1] === at + 1) {
+      i++
+    }
+  }
+  return { exact, tabbed, newlines, carriers, quotes }
 })
 
 function firstAtOrAfter(sorted: readonly number[] | undefined, from: number): number | undefined {
@@ -212,9 +286,15 @@ function firstAtOrAfter(sorted: readonly number[] | undefined, from: number): nu
 }
 
 /** The end of the first line from `from` on that holds just `word`: a heredoc's terminator. */
-function terminatorAfter(cmd: string, word: string, stripsTabs: boolean, from: number): number | undefined {
-  const lines = linesOf(cmd)
+function terminatorAfter(lines: Lines, word: string, stripsTabs: boolean, from: number): number | undefined {
   return firstAtOrAfter((stripsTabs ? lines.tabbed : lines.exact).get(word), from)
+}
+
+/** Just past the first `"` after the terminator of `heredoc`, in a string that starts at `start`. */
+function endPastHeredoc(lines: Lines, heredoc: Unterminated, start: number): number | undefined {
+  const terminated = terminatorAfter(lines, heredoc.word, heredoc.stripsTabs, start + heredoc.bodyAt)
+  const close = terminated === undefined ? undefined : firstAtOrAfter(lines.quotes, terminated)
+  return close === undefined ? undefined : close + 1
 }
 
 /**
@@ -238,21 +318,165 @@ export function scrubShell(cmd: string, keep: Keep = 'nothing'): string {
   return scrub(cmd, keep, MAX_QUOTED_PARTS)
 }
 
+// An open parenthesis the scan is inside of. `glue` is set for the kinds whose
+// output the shell joins to the surrounding word (`$(`, `<(`, `>(`); `cases`
+// counts the `case` statements open in it, whose pattern terminators `)` close
+// nothing; `at` is where its `(` stands.
+interface ParenFrame { glue: boolean, cases: number, at: number }
+
+function baseFrame(): ParenFrame {
+  return { glue: false, cases: 0, at: -1 }
+}
+
+// Applies a `)` to the stack and returns the parenthesis it closed. A `case`
+// pattern terminator closes nothing and reads as command context, as does a `)`
+// with no opener.
+function closeFrame(stack: ParenFrame[]): ParenFrame | undefined {
+  const top = stack[stack.length - 1]!
+  return top.cases > 0 || stack.length === 1 ? undefined : stack.pop()
+}
+
+// Whether that `)` closed a word-gluing substitution.
+const applyClose = (stack: ParenFrame[]): boolean => closeFrame(stack)?.glue ?? false
+
+// The keywords after which a command starts.
+const COMMAND_KEYWORDS = new Set(['then', 'do', 'else', 'elif', 'if', 'while', 'until'])
+
+// Whether a command can start at `at`: at the start of the text, after a
+// separator, a line continuation or an opening parenthesis, after a keyword
+// that takes a command, or right after the `)` at `patternEnd` that ended a
+// `case` pattern. The shell reads `case` and `esac` as keywords only there; in
+// `echo case` or `--ignore-case` they are words, and the `)` that follows
+// closes the substitution. A `case` the shell takes for text, in a `[[ … ]]`, in
+// arithmetic or in a `${…}` word that holds a quote, still reads as a statement
+// here.
+function startsCommand(cmd: string, at: number, patternEnd: number): boolean {
+  let i = at - 1
+  for (;;) {
+    while (cmd[i] === ' ' || cmd[i] === '\t') {
+      i--
+    }
+    const char = cmd[i]
+    if (char === '\n' && cmd[i - 1] === '\\') {
+      i -= 2
+      continue
+    }
+    if (char === undefined || ';&|(\n'.includes(char)) {
+      return true
+    }
+    if (char === ')') {
+      return i === patternEnd
+    }
+    let start = i
+    while (start >= 0 && /\w/.test(cmd[start]!)) {
+      start--
+    }
+    if (!COMMAND_KEYWORDS.has(cmd.slice(start + 1, i + 1))) {
+      return false
+    }
+    i = start
+  }
+}
+
+// Applies the parentheses and `case` statements of `cmd` to `stack`, in order,
+// over the stretch between two offsets. The next one found is kept between
+// calls, so a long stretch without any is searched once, not again for every
+// call that ends inside it.
+function parenTracker(cmd: string, stack: ParenFrame[], closed?: (open: number, close: number) => void): (from: number, to: number) => void {
+  const tokens = /[()]|\bcase(?=[ \t\n])|\besac(?![^\s;&|)])/g
+  let next: RegExpExecArray | null | undefined
+  let patternEnd = -1
+  return (from, to) => {
+    if (next === undefined || (next !== null && next.index < from)) {
+      tokens.lastIndex = from
+      next = tokens.exec(cmd)
+    }
+    for (; next !== null && next.index < to; next = tokens.exec(cmd)) {
+      const top = stack[stack.length - 1]!
+      if (next[0] === '(') {
+        const before = cmd[next.index - 1]
+        stack.push({ glue: before === '$' || before === '<' || before === '>', cases: 0, at: next.index })
+      }
+      else if (next[0] === ')') {
+        if (top.cases > 0) {
+          patternEnd = next.index
+        }
+        const frame = closeFrame(stack)
+        if (frame) {
+          closed?.(frame.at, next.index)
+        }
+      }
+      else if (startsCommand(cmd, next.index, patternEnd)) {
+        top.cases = next[0] === 'case' ? top.cases + 1 : Math.max(0, top.cases - 1)
+      }
+    }
+  }
+}
+
+interface Nested {
+  /** Receives each heredoc whose terminator is not in the text. */
+  readonly unterminated?: Unterminated[] | undefined
+  /** The parentheses the text sits in, which it adds to and leaves as it ends. */
+  readonly stack?: ParenFrame[] | undefined
+  /** How many heredoc bodies the text sits in, each read for its substitutions. */
+  readonly heredocs?: number | undefined
+}
+
 // `parts` is how many strings a substitution in a double-quoted string may be
 // joined from. A text that is read inside one is not joined again, so the
 // work stays a few passes over it.
-function scrub(cmd: string, keep: Keep, parts: number): string {
+function scrub(cmd: string, keep: Keep, parts: number, nested: Nested = {}): string {
   const opaque = new RegExp(OPAQUE)
+  // Held here: the texts read inside a string would push this one out of the
+  // memory of `linesOf`, and every heredoc would build it again.
+  let held: Lines | undefined
+  const lines = (): Lines => (held ??= linesOf(cmd))
+  // Reading a string through its heredoc is tried once for a stretch of the
+  // line: where it failed, the strings inside are not tried again.
+  let settled = 0
+  // Only a `)` directly before a `#` can make the comment reading depend on the
+  // parentheses, so they are tracked only where the line holds that pair, or
+  // where the caller's stack needs them.
+  const heredocs = nested.heredocs ?? 0
+  const stack = nested.stack ?? [baseFrame()]
+  const track = nested.stack || cmd.includes(')#') ? parenTracker(cmd, stack) : undefined
   let out = ''
   let copied = 0
+  let tracked = 0
   for (let m = opaque.exec(cmd); m; m = opaque.exec(cmd)) {
     const [all, opener, word] = m
     let replacement: string
     let end = m.index + all.length
-    if (opener === undefined && keep === 'nothing' && all.startsWith('"')) {
-      const exposed = exposeQuoted(cmd, opaque, m, parts)
+    if (track) {
+      // A comment that starts after a `(` has it in its match.
+      const codeEnd = m.index + (all.startsWith('(') ? 1 : 0)
+      track(tracked, codeEnd)
+      tracked = codeEnd
+    }
+    if (opener === undefined && all === ')#') {
+      // A `#` glued to a `)`: a comment only where the `)` ends a command.
+      if (applyClose(stack)) {
+        replacement = ')'
+        end = m.index + 1
+      }
+      else {
+        const lineEnd = cmd.indexOf('\n', m.index)
+        end = lineEnd < 0 ? cmd.length : lineEnd
+        replacement = `)${' '.repeat(end - m.index - 1)}`
+      }
+      opaque.lastIndex = end
+    }
+    else if (opener === undefined && keep === 'nothing' && all.startsWith('"')) {
+      const exposed = exposeQuoted(cmd, opaque, m, parts, track !== undefined, heredocs, parts > 0 && m.index >= settled ? lines : undefined)
       replacement = exposed.text
       end = exposed.end
+      settled = Math.max(settled, exposed.tried ?? 0)
+      for (const frame of exposed.frames ?? []) {
+        stack.push(frame)
+      }
+    }
+    else if (opener === undefined && all.startsWith('${')) {
+      replacement = all
     }
     else if (opener === undefined) {
       replacement = blankStretch(all, keep)
@@ -261,19 +485,37 @@ function scrub(cmd: string, keep: Keep, parts: number): string {
       // The body starts on the line after the one the header ends, which a
       // backslash or an open quote can carry past the next newline.
       const headerStart = m.index + opener.length
-      const lineEnd = logicalLineEnd(cmd, headerStart)
+      const lineEnd = logicalLineEnd(cmd, headerStart, lines())
+      const stripsTabs = opener.startsWith('<<-')
       // The terminator may be the body's first line.
-      const terminatorEnd = lineEnd < 0 ? undefined : terminatorAfter(cmd, unquote(word!), opener.startsWith('<<-'), lineEnd + 1)
+      const terminatorEnd = lineEnd < 0 ? undefined : terminatorAfter(lines(), unquote(word!), stripsTabs, lineEnd + 1)
       if (terminatorEnd === undefined) {
+        if (lineEnd >= 0) {
+          nested.unterminated?.push({ word: unquote(word!), stripsTabs, bodyAt: lineEnd + 1 })
+        }
         opaque.lastIndex = m.index + 2
         continue
       }
-      replacement = `<<${blank(opener.slice(2))}${scrub(cmd.slice(headerStart, lineEnd), keep, parts)}${blank(cmd.slice(lineEnd, terminatorEnd))}`
+      // A body whose delimiter is not quoted is expanded like a double-quoted
+      // string, so a substitution in it runs.
+      const expands = keep === 'nothing' && !/["'\\]/.test(word!)
+      if (expands && heredocs >= MAX_HEREDOC_DEPTH) {
+        opaque.lastIndex = m.index + 2
+        continue
+      }
+      const body = cmd.slice(lineEnd, terminatorEnd)
+      // The rest of the header line holds commands of the same list, so its
+      // parentheses count with the ones around it.
+      replacement = `<<${blank(opener.slice(2))}${scrub(cmd.slice(headerStart, lineEnd), keep, parts, track && { stack })}${expands ? exposeSubstitutions(`"${body}"`, false, heredocs + 1).text.slice(1, -1) : blank(body)}`
       end = terminatorEnd
       opaque.lastIndex = end
     }
     out += cmd.slice(copied, m.index) + replacement
     copied = end
+    tracked = end
+  }
+  if (nested.stack) {
+    track?.(tracked, cmd.length)
   }
   return out + cmd.slice(copied)
 }
@@ -333,6 +575,11 @@ export const pairsOf = remember((scrubbed): Pairs => {
       ticks.push(i)
     }
   }
+  // The `)` that ends a `case` pattern closes nothing, so a substitution that
+  // holds one ends at a later `)`. The pairs above stay where that reading finds
+  // none: a word `case` taken for a statement (`${x:-;case y}`) would otherwise
+  // leave the substitution open, and the command after it unjoined from its own.
+  parenTracker(scrubbed, [baseFrame()], (opener, close) => closing.set(opener, close))(0, scrubbed.length)
   return { closing, ticks }
 })
 
@@ -489,8 +736,8 @@ const walkedOf = remember(() => new Map<number, number>())
  * continues the line, and a quote or a heredoc header can run over a newline
  * too; a newline inside a comment is where the comment ends.
  */
-export function logicalLineEnd(cmd: string, from: number): number {
-  const { newlines, carriers } = linesOf(cmd)
+export function logicalLineEnd(cmd: string, from: number, lines = linesOf(cmd)): number {
+  const { newlines, carriers } = lines
   const newline = firstAtOrAfter(newlines, from) ?? -1
   // Only a quote or a backslash can carry the line past its first newline.
   if (newline < 0 || (firstAtOrAfter(carriers, from) ?? newline) >= newline) {
@@ -549,7 +796,7 @@ export function heredocAt(cmd: string, at: number): Heredoc | null {
   const word = unquote(raw!)
   const delimiterEnd = HEREDOC_DELIMITER.lastIndex
   const lineEnd = logicalLineEnd(cmd, delimiterEnd)
-  const end = lineEnd < 0 ? undefined : terminatorAfter(cmd, word, stripsTabs, lineEnd + 1)
+  const end = lineEnd < 0 ? undefined : terminatorAfter(linesOf(cmd), word, stripsTabs, lineEnd + 1)
   if (end === undefined)
     return null
   return {

@@ -75,9 +75,10 @@ function checkShell(command: string, env: GuardEnv, options: ScanOptions): Findi
   const scan = findSecretsInCommand(command, options)
   if (scan.findings.length > 0 && onlyWritesTo(command, path => env.isIgnored(path)))
     return []
-  // git and gh publish these files verbatim, so their contents are part of the
-  // call. One that cannot be read, or a source no file name pins down, blocks
-  // the call: letting it through would read an unscanned file as "no file".
+  // git, gh and the uploaders (curl, scp, nc) send these files verbatim, so
+  // their contents are part of the call. One that cannot be read, or a source no
+  // file name pins down, blocks the call: letting it through would read an
+  // unscanned file as "no file".
   const unread: string[] = []
   const scanFile = (file: string): Finding[] => {
     const text = env.readFile(file)

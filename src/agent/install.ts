@@ -41,9 +41,14 @@ function readSettings(file: string): Settings {
   catch (error) {
     throw new Error(`${file} is not valid JSON (${(error as Error).message}); it was left unchanged`)
   }
+  // A `null` where the hooks object or the PreToolUse list would go is read as
+  // absent, as the agents do, and the hook is written in; a wrong non-null
+  // shape would lose what the agent reads, so it is refused.
   const hooks = isObject(settings) ? settings.hooks : undefined
   const preToolUse = isObject(hooks) ? hooks.PreToolUse : undefined
-  if (!isObject(settings) || (hooks !== undefined && !isObject(hooks)) || (preToolUse !== undefined && !Array.isArray(preToolUse))) {
+  const wrongHooks = hooks !== undefined && hooks !== null && !isObject(hooks)
+  const wrongPreToolUse = preToolUse !== undefined && preToolUse !== null && !Array.isArray(preToolUse)
+  if (!isObject(settings) || wrongHooks || wrongPreToolUse) {
     throw new Error(`${file} does not hold a settings object with a hooks object and a PreToolUse list; it was left unchanged`)
   }
   return settings as Settings
