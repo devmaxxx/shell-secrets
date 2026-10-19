@@ -77,15 +77,16 @@ export interface CommandScan {
   readonly redirectTargets: string[]
   /**
    * Files that `git` or `gh` publish verbatim (`commit -F msg`, `pr create --body-file body`,
-   * the file a `-F -` reads through `<` or `cat file |`) and files `git add -f` stages.
+   * the file a `-F -` reads through `<` or `cat file |`), files `git add -f` stages, and files
+   * a `curl`, `wget`, HTTPie, `scp`, `rsync` or `nc` command sends off the machine.
    * The scanner cannot read them; scan their contents with {@link findSecrets}.
    */
   readonly messageFiles: string[]
   /**
    * What the command publishes that no file name pins down: `git add -f -A`, a
    * `--body-file -` fed by a stage other than `cat`, a relative path after `cd`,
-   * a file the command fills from anything but a literal `echo`. Treat each as
-   * unscanned.
+   * a file the command fills from anything but a literal `echo`, a request body
+   * a substitution fills in. Treat each as unscanned.
    */
   readonly unresolvedSources: string[]
 }

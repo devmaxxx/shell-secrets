@@ -1,5 +1,5 @@
 import type { Heredoc, Segment } from './parse'
-import { ANSI_C_STRING, ARGUMENTS_FROM_STDIN, CAT_HEREDOC, CLOSING_PAREN, COMMAND_RUNNERS, CURL_DATA_FILE, CURL_FORM_FILE, CURL_GRAMMAR, CURL_URLENCODE_FILE, ENV_VALUED_OPTION, FIELD_FROM_FILE, GH_ALIASES, GH_FIELD_OPTIONS, GH_GRAMMARS, GH_WRITES, GIT_GRAMMARS, GIT_PLACE_OPTION, GIT_VALUED_GLOBAL, HTTPIE_FILE, HTTPIE_GRAMMAR, IDENTITY_ASSIGNMENT, IDENTITY_CONFIG, LEADING_EXPANSIONS, LITERAL_ECHO, LOGIN_OPTION, MAX_COMMAND_CANDIDATES, NETCATS, REDIRECT_OPERATOR, REMOTE_TARGET, RSYNC_GRAMMAR, RUNNER_COMMAND_OPTION, SCP_GRAMMAR, SHELL_COMMAND_OPTION, SHELL_STDIN_OPTION, SHELL_VALUED_LONG_OPTION, SHELLS, SPLIT_STRING_OPTION, UPLOADERS, WATCH_VALUED_OPTION, WGET_GRAMMAR } from './constants'
+import { ANSI_C_STRING, ARGUMENTS_FROM_STDIN, CAT_HEREDOC, CLOSING_PAREN, COMMAND_RUNNERS, CURL_BODY, CURL_FILE_VALUE, CURL_GRAMMAR, ENV_VALUED_OPTION, FIELD_FROM_FILE, GH_ALIASES, GH_FIELD_OPTIONS, GH_GRAMMARS, GH_WRITES, GIT_GRAMMARS, GIT_PLACE_OPTION, GIT_VALUED_GLOBAL, HTTPIE_DATA, HTTPIE_FILE, HTTPIE_GRAMMAR, IDENTITY_ASSIGNMENT, IDENTITY_CONFIG, LEADING_EXPANSIONS, LITERAL_ECHO, LOGIN_OPTION, MAX_BRACE_WORDS, MAX_COMMAND_CANDIDATES, MAX_SPREAD_WORDS, NETCATS, REDIRECT_OPERATOR, REMOTE_TARGET, RSYNC_GRAMMAR, RUNNER_COMMAND_OPTION, SCP_GRAMMAR, SHELL_COMMAND_OPTION, SHELL_STDIN_OPTION, SHELL_VALUED_LONG_OPTION, SHELLS, SPLIT_STRING_OPTION, UPLOADERS, WATCH_VALUED_OPTION, WGET_BODY, WGET_GRAMMAR } from './constants'
 import { afterContinuations, codeEnd, decodeEscapes, endOf, heredocAt, pairsOf, skipBlanks, unquote, wordAt } from './parse'
 
 type LongOption = readonly [name: string, shortestPrefix: number, valued: boolean]
@@ -48,14 +48,26 @@ export interface Publication {
   readonly identity: number
 }
 
-interface Word { readonly value: string, readonly at: number, readonly end: number }
+interface Word {
+  readonly value: string
+  readonly at: number
+  readonly end: number
+  /** One of the words a brace group spread the source word into: the brace-free glob it reads as, quoting kept as backslashes. They share the source word's offsets. */
+  readonly pattern?: string
+  /** A brace group too wide to list stands in the word, so what the shell makes of it is unknown. */
+  readonly unread?: true
+}
 
 interface Option { readonly name: string, readonly value: string | undefined, readonly valued: boolean, readonly at: number }
 
 interface Parsed { readonly options: Option[], readonly operands: string[] }
 
-/** A segment's words, the offset after each `<<`, and the text of each here-string. */
-interface Spoken { readonly words: Word[], readonly heredocs: number[], readonly hereStrings: string[] }
+/**
+ * A segment's words, the offset after each `<<`, and the text of each
+ * here-string. `vague` is set when a brace group made a word that may be no
+ * word at all, and the words stand for the reading that drops it.
+ */
+interface Spoken { readonly words: Word[], readonly heredocs: number[], readonly hereStrings: string[], readonly vague: boolean }
 
 const COMMANDS = new Set(['git', 'gh', 'eval', ...SHELLS])
 
@@ -65,19 +77,18 @@ const NOTHING: Publication = Object.freeze({ publishes: false, content: false, f
 // rather than pass what it cannot see.
 const unreadable = (text: string, content = false): Publication => ({ ...NOTHING, publishes: true, content, unresolved: [text] })
 
+const withoutLeadingExpansions = (text: string): string => text.slice(LEADING_EXPANSIONS.exec(text)?.[0].length ?? 0)
+
 // The command a word names, past the expansions glued before it: `${X}git`
-// runs git when X is empty.
+// runs git when X is empty. A word a brace group spread out has its own value,
+// where the source text is the group.
 function nameOf(cmd: string, word: Word): string {
-  const raw = cmd.slice(word.at, word.end)
-  const name = unquote(raw.slice(LEADING_EXPANSIONS.exec(raw)?.[0].length ?? 0))
-  return name.slice(name.lastIndexOf('/') + 1)
+  const name = word.pattern === undefined ? unquote(withoutLeadingExpansions(cmd.slice(word.at, word.end))) : withoutLeadingExpansions(word.value)
+  // zsh expands `=git` to the path of git.
+  return name.startsWith('=') && !name.includes('/') ? name.slice(1) : name.slice(name.lastIndexOf('/') + 1)
 }
 
 const isFilledIn = (word: string): boolean => /[$`]/.test(word)
-
-// A brace pattern this wide is read as a glob that could name git or gh, since
-// a command name does not spread over so many alternatives.
-const MAX_BRACE_WORDS = 64
 
 // Reads the command word as a glob pattern, keeping its quoting: a backslash
 // escapes the quoted characters so a `*` inside quotes stays a literal filename
@@ -92,8 +103,9 @@ function globPattern(raw: string): string {
   for (let i = 0; i < raw.length; i++) {
     const c = raw[i]!
     if (c === '\\') {
-      if (i + 1 < raw.length) {
-        literal(raw[++i]!)
+      // Like unquote, a backslash-newline only continues the line and is dropped.
+      if (i + 1 < raw.length && raw[++i] !== '\n') {
+        literal(raw[i]!)
       }
     }
     else if (c === '\'') {
@@ -107,12 +119,16 @@ function globPattern(raw: string): string {
       literal(ansi ? unquote(ansi[0]) : raw.slice(i))
       i = ansi ? ANSI_C_STRING.lastIndex - 1 : raw.length
     }
-    else if (c === '"') {
+    else if (c === '"' || (c === '$' && raw[i + 1] === '"')) {
+      // `$"…"` is a double-quoted string the shell may translate: read as the string.
+      if (c === '$') {
+        i++
+      }
       let end = i + 1
       while (end < raw.length && raw[end] !== '"') {
         end += raw[end] === '\\' ? 2 : 1
       }
-      literal(raw.slice(i + 1, end).replace(/\\(["\\$`])/g, '$1'))
+      literal(raw.slice(i + 1, end).replace(/\\(["\\$`\n])/g, (_escape, char: string) => char === '\n' ? '' : char))
       i = end
     }
     else {
@@ -122,45 +138,70 @@ function globPattern(raw: string): string {
   return out
 }
 
-// The brace-free alternatives a pattern expands to, or `null` when it would
-// spread past the bound: too many words, or nested deeper than that many could
-// reach. Only the first group on a path is split; the rest follow the recursion.
+// The words a pattern spreads into when the shell expands its brace groups, or
+// `null` when it would spread past the bound: too many words, or too many `{`
+// probed. A pattern with no group comes back whole. Only the first group on a
+// path is split; the rest follow the recursion.
 function expandBraces(pattern: string): string[] | null {
   const out: string[] = []
   // A `{` that opens no group is scanned to the line's end, so a run of them is
   // bounded too, not only the words and the nesting the recursion reaches.
   let probes = 0
-  const expand = (prefix: string, rest: string, depth: number): boolean => {
-    if (out.length > MAX_BRACE_WORDS || depth > MAX_BRACE_WORDS || probes > MAX_BRACE_WORDS) {
-      return false
-    }
+  const expand = (prefix: string, rest: string): boolean => {
     for (let i = 0; i < rest.length; i++) {
       if (rest[i] === '\\') {
         i++
-        continue
       }
-      if (rest[i] === '{') {
+      else if (rest[i] === '$' && rest[i + 1] === '{') {
+        // The braces of `${…}` belong to the parameter, whatever commas it holds.
         probes++
-        const alternatives = braceAlternatives(rest, i)
-        if (alternatives) {
-          return alternatives.every(alt => expand(prefix + rest.slice(0, i), alt + rest.slice(alternatives.end), depth + 1))
-        }
-        if (probes > MAX_BRACE_WORDS) {
+        i = parameterEnd(rest, i + 1)
+      }
+      else if (rest[i] === '{') {
+        probes++
+        const group = braceGroup(rest, i)
+        if (group === 'wide') {
           return false
         }
+        if (group) {
+          return group.parts.every(alt => expand(prefix + rest.slice(0, i), alt + rest.slice(group.end)))
+        }
       }
+      if (probes > MAX_BRACE_WORDS) {
+        return false
+      }
+    }
+    if (out.length === MAX_BRACE_WORDS) {
+      return false
     }
     out.push(prefix + rest)
     return true
   }
-  return expand('', pattern, 0) ? out : null
+  return expand('', pattern) ? out : null
 }
 
-interface BraceAlternatives extends Array<string> { end: number }
+// Where the `}` stands that closes the `${` whose brace is at `open`, or `open`
+// when none does.
+function parameterEnd(text: string, open: number): number {
+  let depth = 0
+  for (let i = open; i < text.length; i++) {
+    if (text[i] === '\\') {
+      i++
+    }
+    else if (text[i] === '{') {
+      depth++
+    }
+    else if (text[i] === '}' && --depth === 0) {
+      return i
+    }
+  }
+  return open
+}
 
-// The comma-separated alternatives of the brace group that opens at `open`, and
-// where it closes, or `null` when it is not a group (no comma, or unbalanced).
-function braceAlternatives(pattern: string, open: number): BraceAlternatives | null {
+// The words of the brace group that opens at `open`, comma-separated or a
+// sequence, and where it closes; `null` when it is no group (one word between
+// braces, or unbalanced), `'wide'` for a sequence past the bound.
+function braceGroup(pattern: string, open: number): { parts: string[], end: number } | 'wide' | null {
   const parts: string[] = []
   let depth = 0
   let start = open + 1
@@ -177,14 +218,42 @@ function braceAlternatives(pattern: string, open: number): BraceAlternatives | n
       start = i + 1
     }
     else if (c === '}' && --depth === 0) {
-      if (parts.length === 0) {
-        return null
+      if (parts.length > 0) {
+        parts.push(pattern.slice(start, i))
+        return { parts, end: i + 1 }
       }
-      parts.push(pattern.slice(start, i))
-      return Object.assign(parts, { end: i + 1 })
+      const sequence = sequenceOf(pattern.slice(open + 1, i))
+      return sequence === 'wide' || sequence === null ? sequence : { parts: sequence, end: i + 1 }
     }
   }
   return null
+}
+
+// `1..3`, `a..e` and `1..9..2` as the shell lists them, `null` for text that is
+// no sequence (`1..a`), `'wide'` past the bound. Zero padding follows an end
+// written with a leading zero.
+function sequenceOf(body: string): string[] | 'wide' | null {
+  const match = /^(-?\d+|[a-z])\.\.(-?\d+|[a-z])(?:\.\.(-?\d+))?$/i.exec(body)
+  if (!match) {
+    return null
+  }
+  const [, from, to, by] = match as unknown as [string, string, string, string | undefined]
+  const numeric = /\d/.test(from)
+  if (numeric !== /\d/.test(to)) {
+    return null
+  }
+  const [first, last] = numeric ? [Number(from), Number(to)] : [from.charCodeAt(0), to.charCodeAt(0)]
+  const step = Math.abs(Number(by ?? 1)) || 1
+  const count = Math.floor(Math.abs(last - first) / step) + 1
+  // Not `count > MAX`: a number too large to hold makes it NaN.
+  if (!(count <= MAX_BRACE_WORDS)) {
+    return 'wide'
+  }
+  const width = numeric && (/^-?0\d/.test(from) || /^-?0\d/.test(to)) ? Math.max(from.replace('-', '').length, to.replace('-', '').length) : 0
+  return Array.from({ length: count }, (_, k) => {
+    const n = first + (first <= last ? 1 : -1) * step * k
+    return numeric ? `${n < 0 ? '-' : ''}${String(Math.abs(n)).padStart(width, '0')}` : String.fromCharCode(n)
+  })
 }
 
 // Whether the brace-free glob `pattern` matches the whole of `text`, with `*`,
@@ -196,34 +265,17 @@ function globMatches(pattern: string, text: string): boolean {
   let mark = 0
   while (t < text.length) {
     const c = pattern[p]
-    if (c === '\\' && p + 1 < pattern.length && pattern[p + 1] === text[t]) {
-      p += 2
-      t++
-    }
-    else if (c === '?') {
-      p++
-      t++
-    }
-    else if (c === '*') {
+    const next = c === '[' ? matchClass(pattern, p, text[t]!) : -1
+    if (c === '*') {
       star = p++
       mark = t
     }
-    else if (c === '[') {
-      const next = matchClass(pattern, p, text[t]!)
-      if (next < 0) {
-        if (star < 0) {
-          return false
-        }
-        p = star + 1
-        t = ++mark
-      }
-      else {
-        p = next
-        t++
-      }
-    }
-    else if (c !== undefined && c !== '\\' && c !== '*' && c !== '?' && c !== '[' && c === text[t]) {
+    else if (c === '?' || c === text[t]) {
       p++
+      t++
+    }
+    else if (next >= 0) {
+      p = next
       t++
     }
     else if (star >= 0) {
@@ -262,37 +314,104 @@ function matchClass(pattern: string, open: number, char: string): number {
   return pattern[i] === ']' && matched !== negated ? i + 1 : -1
 }
 
-// Whether the command word, read unquoted as a glob with brace expansion, could
-// name git or gh. Scrubbing blanks quoted parts, so a `* ? [ {` still standing
-// in `scrubbed` was unquoted and is a wildcard; the pattern is read from `cmd`,
-// where the quoting tells a wildcard from a literal filename character. git and
-// gh are the only names that would publish, so only they are tested.
+// What matchClass does not read: a POSIX set in a class (`[[:alpha:]]`,
+// `[[=i=]]`, `[[.i.]]`) and an escaped `]`.
+const UNREAD_GLOB = /\[[:=.]|\\\]/
+
+// Whether the command word, read unquoted as a glob, could name git or gh.
+// Scrubbing blanks quoted parts, so a `* ? [` still standing in `scrubbed` was
+// unquoted and is a wildcard; the pattern is read from `cmd`, where the quoting
+// tells a wildcard from a literal filename character, and a word a brace group
+// spread out carries its own. Only git and gh are tried, as for a name the shell
+// fills in: a glob that spells another command (`cur[l]`, `ba*h`) goes unread.
+// A word marked unread, or holding what UNREAD_GLOB lists, may name either.
 function isGlobName(cmd: string, scrubbed: string, word: Word): boolean {
-  if (!/[*?[{]/.test(scrubbed.slice(word.at, word.end))) {
-    return false
-  }
-  const raw = cmd.slice(word.at, word.end)
-  const pattern = globPattern(raw.slice(LEADING_EXPANSIONS.exec(raw)?.[0].length ?? 0))
-  const base = pattern.slice(pattern.lastIndexOf('/') + 1)
-  const alternatives = expandBraces(base)
-  if (alternatives === null) {
+  if (word.unread) {
     return true
   }
-  return alternatives.some(alt => globMatches(alt, 'git') || globMatches(alt, 'gh'))
+  if (word.pattern === undefined && !/[*?[]/.test(scrubbed.slice(word.at, word.end))) {
+    return false
+  }
+  const pattern = word.pattern === undefined ? globPattern(withoutLeadingExpansions(cmd.slice(word.at, word.end))) : withoutLeadingExpansions(word.pattern)
+  const base = pattern.slice(pattern.lastIndexOf('/') + 1)
+  return UNREAD_GLOB.test(base) || globMatches(base, 'git') || globMatches(base, 'gh')
+}
+
+// What a substitution reads as inside a brace group: one name for whatever the
+// shell fills in.
+const FILLED_IN = '$_'
+
+// An empty word, or a substitution that may print nothing, is no word in bash
+// and an empty argument in zsh.
+const mayVanish = (word: string): boolean => word === '' || word === FILLED_IN
+
+// `raw`, a word that starts at `at`, with each substitution in it (`$(…)`, a
+// backquoted one, `<(…)`) read as a single name. The `closing` map holds only
+// the ones outside single quotes and escapes.
+function withoutSubstitutions(raw: string, at: number, closing: ReadonlyMap<number, number>): string {
+  let out = ''
+  for (let i = 0; i < raw.length;) {
+    const open = raw[i] === '`' ? i : /[$<>]/.test(raw[i]!) && raw[i + 1] === '(' ? i + 1 : -1
+    const close = open < 0 ? undefined : closing.get(at + open)
+    if (close === undefined || close - at >= raw.length) {
+      out += raw[i++]
+    }
+    else {
+      out += FILLED_IN
+      i = close - at + 1
+    }
+  }
+  return out
+}
+
+// The words an unquoted brace group in `raw` makes of it (`{git,add}` is two,
+// `/usr/bin/{git,gh}` is two), each as the glob pattern it reads as, empty ones
+// included. `undefined` when it holds no group (`${HOME}`, `{}`, a quoted
+// `"{a,b}"`) or only a substitution's, whose braces belong to the command inside
+// it; `null` when it spreads past the bound.
+function spreadOf(raw: string, at: number, closing: ReadonlyMap<number, number>): string[] | null | undefined {
+  if (!raw.includes('{')) {
+    return undefined
+  }
+  const pattern = globPattern(withoutSubstitutions(raw, at, closing))
+  const spread = expandBraces(pattern)
+  if (spread === null) {
+    return null
+  }
+  return spread.length > 1 || spread[0] !== pattern ? spread : undefined
 }
 
 const GH_GROUPS = new Set(Object.keys(GH_GRAMMARS).map(key => key.split(' ')[0]!))
 
+// Where a substitution that opens in `word[from…]`, a word that starts at `at`,
+// closes past the word's end, and before `end`.
+function closesPast(word: string, from: number, at: number, end: number, closing: ReadonlyMap<number, number>): number | undefined {
+  for (let i = word.indexOf('(', from); i >= 0; i = word.indexOf('(', i + 1)) {
+    const close = i > 0 && /[$<>]/.test(word[i - 1]!) ? closing.get(at + i) : undefined
+    if (close !== undefined && close >= at + word.length && close < end) {
+      return close
+    }
+  }
+  return undefined
+}
+
 // The word at `at`, with a substitution the word pattern cannot read, one
 // nested deeper than it counts or a process substitution, taken through the
 // parenthesis that closes it. Dropping the rest of the segment there would hide
-// the command that stands after `FOO=$(…) `.
+// the command that stands after `FOO=$(…) `. The pattern ends a substitution at
+// the first `)` that balances, which for `$(case a in a) …;; esac)` is the one
+// that ends the pattern, and what follows is its words, not the command's.
 function wordFrom(cmd: string, at: number, end: number, closing: ReadonlyMap<number, number>): string {
   let word = wordAt(cmd, at, end)
+  let read = 0
   for (;;) {
     const next = at + word.length
     const open = cmd[next] === '(' && word.endsWith('$') ? next : /[<>]/.test(cmd[next] ?? '') && cmd[next + 1] === '(' ? next + 1 : -1
-    const close = open < 0 ? undefined : closing.get(open)
+    let close = open < 0 ? undefined : closing.get(open)
+    if (close === undefined) {
+      close = closesPast(word, read, at, end, closing)
+      read = word.length
+    }
     if (close === undefined || close >= end) {
       return word
     }
@@ -300,18 +419,37 @@ function wordFrom(cmd: string, at: number, end: number, closing: ReadonlyMap<num
   }
 }
 
-/** The segment's words as the shell passes them, unquoted, with redirects and their targets left out. */
-function wordsOf(cmd: string, segment: Segment, closing: ReadonlyMap<number, number>): Spoken {
+/**
+ * The segment's words as the shell passes them, unquoted, with redirects and
+ * their targets left out. A word of a brace group that may be no word is left
+ * out (bash drops an empty one) unless `keepEmpty` keeps it (zsh passes it on).
+ */
+function wordsOf(cmd: string, segment: Segment, closing: ReadonlyMap<number, number>, keepEmpty = false): Spoken {
   const end = codeEnd(segment)
   const words: Word[] = []
   const heredocs: number[] = []
   const hereStrings: string[] = []
+  let vague = false
+  let spare = MAX_SPREAD_WORDS
   let at = skipBlanks(cmd, segment.start)
   while (at < end) {
     const raw = wordFrom(cmd, at, end, closing)
     if (raw && !(/^\d+$/.test(raw) && /[<>]/.test(cmd[at + raw.length] ?? ''))) {
-      words.push({ value: unquote(raw), at, end: at + raw.length })
-      at = skipBlanks(cmd, at + raw.length)
+      const listed = spreadOf(raw, at, closing)
+      const spread = keepEmpty || !listed ? listed : listed.filter(word => !mayVanish(word))
+      vague ||= !!listed && listed.length !== spread?.length
+      const stop = at + raw.length
+      const extra = spread ? Math.max(spread.length - 1, 0) : 0
+      if (spread && extra <= spare) {
+        spare -= extra
+        for (const pattern of spread)
+          words.push({ value: pattern.replace(/\\([\s\S])/g, '$1'), at, end: stop, pattern })
+      }
+      else {
+        const word = { value: unquote(raw), at, end: stop }
+        words.push(spread === undefined ? word : { ...word, unread: true })
+      }
+      at = skipBlanks(cmd, stop)
       continue
     }
     at += raw.length
@@ -328,7 +466,7 @@ function wordsOf(cmd: string, segment: Segment, closing: ReadonlyMap<number, num
       hereStrings.push(unquote(target))
     at = skipBlanks(cmd, at + target.length)
   }
-  return { words, heredocs, hereStrings }
+  return { words, heredocs, hereStrings, vague }
 }
 
 function parse(words: readonly Word[], grammar: Grammar): Parsed {
@@ -385,6 +523,9 @@ function optionFiles(parsed: Parsed, grammar: Grammar, publication: Publication,
 // `guessed` is set when the command name was filled in by the shell and only
 // may be git: a subcommand filled in as well then proves nothing.
 function git(words: readonly Word[], fromStdin: boolean, text: string, guessed = false): Publication {
+  // A brace group too wide to list can stand for an option or the subcommand.
+  if (words.some(w => w.unread))
+    return guessed ? NOTHING : unreadable(text)
   let j = 0
   let elsewhere = false
   let identity = Number.POSITIVE_INFINITY
@@ -418,13 +559,16 @@ function git(words: readonly Word[], fromStdin: boolean, text: string, guessed =
     if (fromStdin || has(parsed, 'pathspec-from-file', 'stdin', 'stdin-paths', 'index-info'))
       return { ...publication, unresolved: [text] }
     const all = sub === 'add' && parsed.operands.length === 0 && has(parsed, 'A', 'all')
-    publication.files.push(...(all ? ['.'] : parsed.operands))
+    // git fails on an empty pathspec, so it names no file to scan; zsh leaves
+    // one where a brace alternative is empty, as in `git add {,-f} x`.
+    publication.files.push(...(all ? ['.'] : parsed.operands.filter(operand => operand !== '')))
     return publication
   }
-  // A stash publishes only through its message: `git stash [push] -m <msg>` or
-  // `git stash save <msg>`, like a commit message. Listing or popping does not.
+  // A stash publishes only through its message: `git stash [push] -m <msg>`,
+  // `git stash save <msg>` or `git stash create <msg>`, like a commit message.
+  // Listing or popping does not.
   if (sub === 'stash') {
-    const saves = parsed.operands[0] === 'save' && parsed.operands.length > 1
+    const saves = (parsed.operands[0] === 'save' || parsed.operands[0] === 'create') && parsed.operands.length > 1
     return has(parsed, 'm', 'message') || saves ? publication : NOTHING
   }
   if (fromStdin)
@@ -469,6 +613,8 @@ function flagBefore(words: readonly Word[], path: readonly number[]): number {
 }
 
 function gh(words: readonly Word[], fromStdin: boolean, text: string, guessed = false): Publication {
+  if (words.some(w => w.unread))
+    return guessed ? NOTHING : unreadable(text)
   const path = ghCommandPath(words)
   const [group = '', rawSub = ''] = path.map(k => words[k]!.value)
   // `gh api`'s second word is the endpoint, which no alias renames.
@@ -512,55 +658,76 @@ function gh(words: readonly Word[], fromStdin: boolean, text: string, guessed = 
   return publication
 }
 
-// The files curl sends: a request body, a form field or an upload, each from a
-// file the option's value points at. `@-` and `-T -` send stdin.
-function curlFiles(words: readonly Word[], publication: Publication, text: string): void {
-  for (const option of parse(words, CURL_GRAMMAR).options) {
-    const value = option.value ?? ''
-    const file
-      = option.name === 'data' || option.name === 'data-ascii' || option.name === 'data-binary' || option.name === 'd'
-        ? CURL_DATA_FILE.exec(value)?.[1]
-        : option.name === 'data-urlencode'
-          ? CURL_URLENCODE_FILE.exec(value)?.[1]
-          : option.name === 'form' || option.name === 'F'
-            ? CURL_FORM_FILE.exec(value)?.[1]
-            : option.name === 'upload-file' || option.name === 'T'
-              ? value
-              : undefined
+// The files curl sends: a request body, a form field, an upload or header lines,
+// each from a file the option's value points at. `@-` and `-T -` send stdin.
+function curlFiles(parsed: Parsed, publication: Publication, text: string): void {
+  for (const option of parsed.options) {
+    const file = CURL_FILE_VALUE.get(option.name)?.exec(option.value ?? '')?.[1]
     if (file !== undefined)
       addFile(file, publication, text)
   }
 }
 
+// Where the first of the `names` options starts whose value the shell fills in,
+// or Infinity: the body it sends is then the output of a command or the content
+// of a variable, which the line does not show (`-d "$(cat .env)"`).
+function filledBody(parsed: Parsed, names: ReadonlySet<string>): number {
+  const filled = parsed.options.find(o => names.has(o.name.replace(/^expand-/, '')) && isFilledIn(o.value ?? ''))
+  return filled?.at ?? Number.POSITIVE_INFINITY
+}
+
 // The local files a copy to a remote host sends: with a remote destination
 // last, every source that is not itself remote. A copy between local paths, or
-// one that only pulls down, sends nothing.
+// one that only pulls down, sends nothing. The `;` that ends a `find -exec`
+// and a word the shell fills in, which may be empty, can stand after the
+// destination without moving it.
 function remoteFiles(words: readonly Word[], grammar: Grammar, publication: Publication, text: string): void {
   const { operands } = parse(words, grammar)
-  if (operands.length < 2 || !REMOTE_TARGET.test(operands.at(-1)!))
+  let target = operands.length - 1
+  while (target > 0 && !REMOTE_TARGET.test(operands[target]!) && (operands[target] === ';' || isFilledIn(operands[target]!)))
+    target--
+  if (target < 1 || !REMOTE_TARGET.test(operands[target]!))
     return
-  for (const source of operands.slice(0, -1).filter(path => !REMOTE_TARGET.test(path)))
+  for (const source of operands.slice(0, target).filter(path => !REMOTE_TARGET.test(path)))
     addFile(source, publication, text)
 }
 
 // A command that reads a file and sends it off the machine. Each file is
 // published as a message file is, so its contents are scanned and an ignored
-// one holding a secret still blocks; netcat sends its stdin, read as `-`.
+// one holding a secret still blocks; netcat and httpie send their stdin, read as
+// `-`. A body the shell fills in is content like a commit message's. With no
+// word after the name it is only mentioned, as in `grep nc` or
+// `pip install httpie`, and nothing is sent.
 function uploaded(name: string, words: readonly Word[], text: string): Publication {
+  if (words.length === 0)
+    return NOTHING
   const publication: Publication = { ...NOTHING, publishes: true, files: [], unresolved: [] }
+  let body = Number.POSITIVE_INFINITY
   if (name === 'curl') {
-    curlFiles(words, publication, text)
+    const parsed = parse(words, CURL_GRAMMAR)
+    curlFiles(parsed, publication, text)
+    body = filledBody(parsed, CURL_BODY)
   }
   else if (name === 'wget') {
     const parsed = parse(words, WGET_GRAMMAR)
     optionFiles(parsed, WGET_GRAMMAR, publication, text)
+    body = filledBody(parsed, WGET_BODY)
   }
   else if (name === 'http' || name === 'https' || name === 'httpie') {
-    for (const operand of parse(words, HTTPIE_GRAMMAR).operands) {
-      const file = HTTPIE_FILE.exec(operand)
+    const parsed = parse(words, HTTPIE_GRAMMAR)
+    // `[METHOD] URL [ITEM…]`: a first word of letters only is the method, and the
+    // URL after it is no request item.
+    const items = parsed.operands.slice(/^[a-z]+$/i.test(parsed.operands[0] ?? '') ? 2 : 1)
+    for (const item of items) {
+      const file = HTTPIE_FILE.exec(item)
       if (file)
         addFile(file[1], publication, text)
     }
+    if (items.some(item => isFilledIn(HTTPIE_DATA.exec(item)?.[1] ?? '')))
+      body = words[0]!.at
+    // Input redirected to it is the request body.
+    if (!has(parsed, 'ignore-stdin'))
+      addFile('-', publication, text)
   }
   else if (name === 'scp') {
     remoteFiles(words, SCP_GRAMMAR, publication, text)
@@ -571,6 +738,8 @@ function uploaded(name: string, words: readonly Word[], text: string): Publicati
   else if (NETCATS.has(name)) {
     addFile('-', publication, text)
   }
+  if (body < Number.POSITIVE_INFINITY)
+    return { ...publication, content: true, from: body }
   return publication.files.length > 0 || publication.unresolved.length > 0 ? publication : NOTHING
 }
 
@@ -787,16 +956,47 @@ function tryCommand(cmd: string, spoken: Spoken, command: number, fromStdin: boo
 }
 
 /**
- * What a segment publishes through git or gh. The command is found by name
- * wherever it stands, unquoted (`'git'`, `\git`, `/usr/bin/git`), so a wrapper
- * this does not know (`nice`, `timeout 5`, `find -exec`) cannot hide it, at
- * worst it reads a file that is not one. A name the shell fills in (`$g`,
- * `$(which git)`) is read as git or gh, whichever its arguments would make
- * publish, and a git or gh subcommand the shell fills in is unknown.
- * Arguments built from stdin by `xargs` or `parallel` cannot be read.
+ * What a segment publishes through git or gh, or sends off the machine with an
+ * uploader such as curl, scp or nc. The command is found by name wherever it
+ * stands, unquoted (`'git'`, `\git`, `/usr/bin/git`), so a wrapper this does not
+ * know (`nice`, `timeout 5`, `find -exec`) cannot hide it, at worst it reads a
+ * file that is not one. A name the shell fills in (`$g`, `$(which git)`) is
+ * read as git or gh, whichever its arguments would make publish, and a git or gh
+ * subcommand the shell fills in is unknown. Arguments built from stdin by
+ * `xargs` or `parallel` cannot be read.
  */
 export function publicationOf(cmd: string, scrubbed: string, segment: Segment): Publication {
-  const spoken = wordsOf(cmd, segment, pairsOf(scrubbed).closing)
+  const { closing } = pairsOf(scrubbed)
+  const spoken = wordsOf(cmd, segment, closing)
+  const publication = publicationFrom(cmd, scrubbed, segment, spoken)
+  if (!spoken.vague) {
+    return publication
+  }
+  // A word of a brace group that may be empty (`{,-d}`, `{-f,$(true)}`) is no
+  // word in bash and an empty argument in zsh, which moves the value an option
+  // before it takes: the line is read both ways.
+  return merged(publication, publicationFrom(cmd, scrubbed, segment, wordsOf(cmd, segment, closing, true)))
+}
+
+// What the line publishes if either reading of it holds.
+function merged(a: Publication, b: Publication): Publication {
+  if (a === NOTHING || b === NOTHING) {
+    return a === NOTHING ? b : a
+  }
+  return {
+    publishes: a.publishes || b.publishes,
+    content: a.content || b.content,
+    files: [...a.files, ...b.files],
+    unresolved: [...a.unresolved, ...b.unresolved],
+    scripts: [...a.scripts, ...b.scripts],
+    elsewhere: a.elsewhere || b.elsewhere,
+    stdinScript: a.stdinScript || b.stdinScript,
+    from: Math.min(a.from, b.from),
+    identity: Math.min(a.identity, b.identity),
+  }
+}
+
+function publicationFrom(cmd: string, scrubbed: string, segment: Segment, spoken: Spoken): Publication {
   const { words } = spoken
   const text = segment.text.trim()
   const end = endOf(segment)
@@ -814,6 +1014,7 @@ export function publicationOf(cmd: string, scrubbed: string, segment: Segment): 
   let fromStdin = false
   let tried = 0
   let command = 0
+  let netcat: Publication | undefined
   for (; command < words.length && tried < MAX_COMMAND_CANDIDATES; command++) {
     const name = nameOf(cmd, words[command]!)
     fromStdin ||= ARGUMENTS_FROM_STDIN.has(name)
@@ -823,6 +1024,12 @@ export function publicationOf(cmd: string, scrubbed: string, segment: Segment): 
     tried++
     const publication = tryCommand(cmd, spoken, command, fromStdin, text)
     if (publication.publishes || publication.scripts.length > 0 || publication.stdinScript) {
+      // netcat sends only its stdin. When the name is an option's value
+      // (`env -u nc git add -f .env`), the git after it is what publishes.
+      if (NETCATS.has(name)) {
+        netcat ??= publication
+        continue
+      }
       const assigned = words.slice(0, command).find(w => IDENTITY_ASSIGNMENT.test(w.value))
       return assigned && publication.content ? { ...publication, identity: Math.min(publication.identity, assigned.at) } : publication
     }
@@ -837,7 +1044,7 @@ export function publicationOf(cmd: string, scrubbed: string, segment: Segment): 
   if (words.slice(command).some(untried)) {
     return unreadable(text)
   }
-  return NOTHING
+  return netcat ?? NOTHING
 }
 
 // The offset after a `$(…)` whose output is text the command already shows,

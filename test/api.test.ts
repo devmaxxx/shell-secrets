@@ -1,5 +1,5 @@
 import type { Rule } from '../src'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { defaultRules, findSecrets } from '../src'
 import { fake, p, rand } from './support/fake'
 
@@ -90,5 +90,15 @@ describe('the rule list', () => {
   it('refuses a prepare step that changes the text length, since offsets would lie', () => {
     const broken: Rule = { id: 'broken', name: 'broken', env: null, pattern: /z/, prepare: t => `${t}!` }
     expect(() => findSecrets('abc', { rules: [broken] })).toThrow(/broken/)
+  })
+
+  it('prepares the text once for the rules that share a prepare step', () => {
+    const shared = vi.fn((text: string) => text)
+    const own = vi.fn((text: string) => text)
+    const rule = (id: string, pattern: RegExp, prepare: Rule['prepare']): Rule => ({ id, name: id, env: null, pattern, prepare, placeholders: false })
+    const rules = [rule('a', /one/, shared), rule('b', /two/, shared), rule('c', /three/, own)]
+    expect(findSecrets('one two three', { rules }).map(f => f.ruleId)).toEqual(['a', 'b', 'c'])
+    expect(shared).toHaveBeenCalledTimes(1)
+    expect(own).toHaveBeenCalledTimes(1)
   })
 })

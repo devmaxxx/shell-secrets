@@ -2,7 +2,7 @@ import type { CommandFinding, CommandScan, ScanOptions } from '../types'
 import type { Segment } from './parse'
 import type { Publication, Script } from './publish'
 import { findSecrets } from '../scan/find'
-import { ASSIGNMENT_BEFORE, ASSIGNMENT_LOOKBEHIND, CAT_PASSTHROUGH, CHANGES_DIRECTORY, DEFINES_FUNCTION, EXPANDED_INLINE_INPUT, EXPANDS_VARIABLE, FILE_READER, HARMLESS_DEVICE, HARMLESS_REDIRECT, HEREDOC_INTO_CAT, IDENTITY_FROM_READER, INPUT_REDIRECT, LINE_COUNT, LITERAL_STDIN, MAX_COMMAND_LENGTH, MAX_SCRIPT_DEPTH, MAX_SEGMENT_TEXT, READING_SUBSTITUTION, READS_INTO_VARIABLE, REDIRECT, REDIRECT_OPERATOR, TEE } from './constants'
+import { ASSIGNMENT_BEFORE, ASSIGNMENT_LOOKBEHIND, CAT_PASSTHROUGH, CHANGES_DIRECTORY, DEFINES_FUNCTION, EXPANDED_INLINE_INPUT, EXPANDS_VARIABLE, FILE_READER, HARMLESS_DEVICE, HARMLESS_REDIRECT, HEREDOC_INTO_CAT, IDENTITY_FROM_READER, INPUT_REDIRECT, LINE_COUNT, LITERAL_STDIN, MAX_COMMAND_LENGTH, MAX_PIPED_STAGES, MAX_SCRIPT_DEPTH, MAX_SEGMENT_TEXT, READING_SUBSTITUTION, READS_INTO_VARIABLE, REDIRECT, REDIRECT_OPERATOR, TEE } from './constants'
 import { codeEnd, endOf, hasSubstitution, heredocAt, pairsOf, scrubShell, segments, skipBlanks, unquote, wordAt } from './parse'
 import { opaqueSubstitutionAt, printedTexts, publicationOf } from './publish'
 
@@ -145,15 +145,20 @@ function isPipedFrom(scrubbed: string, segment: Segment, previous: Segment | und
 
 // Text the shell passes on unexpanded: an `echo` or `printf` with no `$` or
 // backtick, a heredoc into `cat` whose delimiter is quoted or whose body has
-// neither, or a `tee` fed by one of those. Its words are in the command, and
-// scanned with it.
+// neither, or a pass-through stage fed by one of those. Its words are in the
+// command, and scanned with it.
 function isLiteralStage(cmd: string, scrubbed: string, stage: Segment): boolean {
-  const original = textOf(cmd, stage)
-  if (TEE.test(stage.text)) {
-    const { before } = stage
-    return isPipedFrom(scrubbed, stage, before) && isLiteralStage(cmd, scrubbed, before)
+  let source = stage
+  // A loop, not a recursion: a pipe of a hundred thousand `cat`s must not
+  // overflow the stack, and a stretch longer than the bound is read as unknown.
+  for (let hops = 0; passesStdinThrough(source); hops++) {
+    const { before } = source
+    if (hops >= MAX_PIPED_STAGES || !isPipedFrom(scrubbed, source, before))
+      return false
+    source = before
   }
-  if (LITERAL_STDIN.test(stage.text))
+  const original = textOf(cmd, source)
+  if (LITERAL_STDIN.test(source.text))
     return !/[$`]/.test(original)
   const heredoc = HEREDOC_INTO_CAT.exec(original)
   if (heredoc === null)
@@ -163,15 +168,16 @@ function isLiteralStage(cmd: string, scrubbed: string, stage: Segment): boolean 
     return true
   // The body stands after the header line, so a stage piped on from `cat <<EOF`
   // has it in its own text, not here.
-  const body = heredocAt(cmd, stage.start + heredoc[0].lastIndexOf('<<') + 2)?.body
+  const body = heredocAt(cmd, source.start + heredoc[0].lastIndexOf('<<') + 2)?.body
   return body !== undefined && !/[$`]/.test(original + body)
 }
 
 function stdinSource(cmd: string, scrubbed: string, segment: Segment, inherited?: () => Published): Published {
   const { before: previous } = segment
   const redirected = inputRedirects(cmd, segment)
+  // `< /dev/null` hands a command no input, as `nc -z host port </dev/null` does.
   if (redirected.length > 0)
-    return publishes(redirected)
+    return publishes(redirected.filter(path => !HARMLESS_DEVICE.test(path)))
   if (!isPipedFrom(scrubbed, segment, previous)) {
     const original = textOf(cmd, segment)
     if (EXPANDED_INLINE_INPUT.test(original) && /[$`]/.test(original))
@@ -207,23 +213,26 @@ interface Piped { scripts: Script[], writer: Segment | undefined, unresolved: st
 // head is a file or a download, beyond what the command line shows.
 function pipedScript(cmd: string, scrubbed: string, stage: Segment, publication: Publication): Piped {
   const none: Piped = { scripts: [], writer: undefined, unresolved: [] }
-  if (!publication.stdinScript || !isPipedFrom(scrubbed, stage, stage.before)) {
+  if (!publication.stdinScript) {
     return none
   }
   let transformed = false
-  for (let source = stage.before; source !== undefined; source = source.before) {
-    if (!passesStdinThrough(source)) {
-      const texts = printedTexts(cmd, scrubbed, source)
-      if (texts.length > 0) {
-        return transformed
-          ? { scripts: [], writer: source, unresolved: [cmd.slice(source.start, endOf(stage)).trim()] }
-          : { scripts: texts, writer: source, unresolved: [] }
-      }
-      transformed = true
+  let consumer = stage
+  let hops = 0
+  for (let source = stage.before; isPipedFrom(scrubbed, consumer, source); consumer = source, source = source.before) {
+    if (++hops > MAX_PIPED_STAGES) {
+      return { ...none, unresolved: [cmd.slice(source.start, endOf(stage)).trim()] }
     }
-    if (!isPipedFrom(scrubbed, source, source.before)) {
-      return none
+    if (passesStdinThrough(source)) {
+      continue
     }
+    const texts = printedTexts(cmd, scrubbed, source)
+    if (texts.length > 0) {
+      return transformed
+        ? { ...none, writer: source, unresolved: [cmd.slice(source.start, endOf(stage)).trim()] }
+        : { scripts: texts, writer: source, unresolved: [] }
+    }
+    transformed = true
   }
   return none
 }
@@ -254,8 +263,9 @@ interface Taint {
 const UNTAINTED: Taint = { filled: false, expanded: false }
 
 /**
- * The files git and gh publish verbatim, and `git add -f` stages: .gitignore
- * keeps those out, so it is how a secret written to .env reaches a commit.
+ * The files git and gh publish verbatim, `git add -f` stages, and an uploader
+ * such as curl, scp or nc sends: .gitignore keeps the first of those out of a
+ * commit, so a secret written to .env reaches one through a forced add.
  *
  * A path with `$` or a backtick is kept verbatim, like a redirect target: the
  * caller cannot read it, and silently dropping it would read as "no file".
@@ -439,7 +449,8 @@ function assignedVariable(cmd: string, start: number): string | undefined {
 
 /**
  * Scans a shell command line: the secrets it carries literally, the files it
- * writes, and the files `git` / `gh` would publish from disk.
+ * writes, and the files `git` / `gh` would publish from disk or an uploader
+ * (`curl`, `scp`, `nc`) would send.
  *
  * @example
  * ```ts
