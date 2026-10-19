@@ -1,7 +1,7 @@
 {
   "name": "shell-secrets",
   "type": "module",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "packageManager": "pnpm@10.23.0",
   "description": "Find live API tokens, private keys and database passwords in strings, logs, AI-agent tool calls and shell commands. Zero dependencies, in-process, typed.",
   "author": "devmaxxx",

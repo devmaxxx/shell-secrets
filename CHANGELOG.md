@@ -5,6 +5,12 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] — 2026-10-19
+
+### Added
+
+- A logo in the README header.
+
 ## [0.2.0] — 2026-10-19
 
 ### Added
@@ -38,5 +44,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `defaultRules`: 38 built-in rules for GitHub, GitLab, Atlassian, Figma, Slack, Discord, Linear, Anthropic, OpenAI, Google, Groq, xAI, Hugging Face, AWS, DigitalOcean, Stripe, SendGrid, Shopify, npm, PyPI, Telegram, private keys, age keys, database URIs and JWTs.
 - Custom rules through `{ rules }`, with `secretGroup`, `ignore`, `prepare` and `placeholders`.
 
+[0.2.1]: https://github.com/devmaxxx/shell-secrets/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/devmaxxx/shell-secrets/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/devmaxxx/shell-secrets/releases/tag/v0.1.0
