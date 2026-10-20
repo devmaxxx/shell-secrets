@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- A global `install` no longer points the hook at the installing package, whose path an nvm or Homebrew Node upgrade, an `npx` cache clean or a rebuild removes or changes; it copies the build to `~/.shell-secrets/<build>/` and runs it through the `~/.shell-secrets/current` link on the Node.js that ran `install`, falling back to the `node` on PATH. The command no longer changes between versions installed by the same Node.js, so Codex keeps trusting it, and the Claude Code entry sets `onFailure: "block"` so a hook that cannot start or times out blocks the call.
+- On a Node.js older than 22 the hook blocks with a message naming the Node it found, and `install` refuses, instead of running an untested check.
+
 ## [0.2.1] — 2026-10-19
 
 ### Added
@@ -44,6 +51,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `defaultRules`: 38 built-in rules for GitHub, GitLab, Atlassian, Figma, Slack, Discord, Linear, Anthropic, OpenAI, Google, Groq, xAI, Hugging Face, AWS, DigitalOcean, Stripe, SendGrid, Shopify, npm, PyPI, Telegram, private keys, age keys, database URIs and JWTs.
 - Custom rules through `{ rules }`, with `secretGroup`, `ignore`, `prepare` and `placeholders`.
 
+[Unreleased]: https://github.com/devmaxxx/shell-secrets/compare/v0.2.1...HEAD
 [0.2.1]: https://github.com/devmaxxx/shell-secrets/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/devmaxxx/shell-secrets/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/devmaxxx/shell-secrets/releases/tag/v0.1.0
