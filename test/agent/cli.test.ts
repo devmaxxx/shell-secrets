@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process'
-import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -12,10 +12,21 @@ describe('cli', () => {
   const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
   const logs = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
   afterEach(() => vi.unstubAllEnvs())
-  const run = (args: string[], input = '', home = mkdtempSync(join(tmpdir(), 'ss-'))): number => {
-    vi.stubEnv('HOME', home)
-    return main(args, { stdin: () => input, script: '/opt/shell-secrets/cli.mjs', skills })
+  const fakeBuild = (body = 'cli'): string => {
+    const dir = mkdtempSync(join(tmpdir(), 'ss-build-'))
+    writeFileSync(join(dir, 'cli.mjs'), `import './chunk.mjs' // ${body}`)
+    writeFileSync(join(dir, 'chunk.mjs'), '')
+    writeFileSync(join(dir, 'cli.d.mts'), '')
+    return join(dir, 'cli.mjs')
   }
+  const script = fakeBuild()
+  const run = (args: string[], input = '', home = mkdtempSync(join(tmpdir(), 'ss-')), from = script): number => {
+    vi.stubEnv('HOME', home)
+    return main(args, { stdin: () => input, script: from, execPath: process.execPath, node: 'v22.0.0', skills })
+  }
+  const hookOf = (file: string): string => JSON.parse(readFileSync(file, 'utf8')).hooks.PreToolUse.at(-1).hooks[0].command
+  const OWN = /^n='.+'; \[ -x "\$n" \] \|\| n=node; "\$n" '.+\/\.shell-secrets\/current\/cli\.mjs' hook \|\| exit 2$/
+  const scriptOf = (command: string): string => realpathSync(command.slice(command.indexOf(`"$n" '`) + 6, -16))
 
   it('blocks a Claude Bash call and a Codex apply_patch call with exit 2', () => {
     const bash = run(['hook'], JSON.stringify({ tool_name: 'Bash', tool_input: { command: `export T=${fake.github()}` } }))
@@ -105,9 +116,10 @@ describe('cli', () => {
   it('quotes a script path holding a $ and names the package in a project install', () => {
     const home = mkdtempSync(join(tmpdir(), 'ss-'))
     vi.stubEnv('HOME', home)
-    main(['install', 'claude'], { stdin: () => '', script: `/opt/cost$5/it's/cli.mjs`, skills })
-    const command = JSON.parse(readFileSync(join(home, '.claude/settings.json'), 'utf8')).hooks.PreToolUse[0].hooks[0].command
-    expect(spawnSync('sh', ['-c', `printf %s ${command.slice(5, -15)}`]).stdout.toString()).toBe(`/opt/cost$5/it's/cli.mjs`)
+    vi.stubEnv('HOME', join(home, `cost$5`, `it's`))
+    main(['install', 'claude'], { stdin: () => '', script, execPath: process.execPath, node: 'v22.0.0', skills })
+    const command = hookOf(join(home, `cost$5/it's/.claude/settings.json`))
+    expect(spawnSync('sh', ['-c', `printf %s ${command.slice(command.lastIndexOf('"$n" ') + 5, -15)}`]).stdout.toString()).toBe(`${home}/cost$5/it's/.shell-secrets/current/cli.mjs`)
     vi.spyOn(process, 'cwd').mockReturnValue(home)
     run(['install', 'codex', '--project'], '', home)
     expect(JSON.parse(readFileSync(join(home, '.codex/hooks.json'), 'utf8')).hooks.PreToolUse[0].hooks[0].command).toBe('npx --no-install shell-secrets hook || exit 2')
@@ -156,7 +168,7 @@ describe('cli', () => {
     run(['install', 'claude'], '', home)
     const twice = JSON.parse(readFileSync(file, 'utf8')).hooks.PreToolUse
     expect(twice).toHaveLength(2)
-    expect(twice[1]).toMatchObject({ matcher: 'Bash|Write|Edit|MultiEdit|NotebookEdit', hooks: [{ command: `node '/opt/shell-secrets/cli.mjs' hook || exit 2` }] })
+    expect(twice[1]).toMatchObject({ matcher: 'Bash|Write|Edit|MultiEdit|NotebookEdit', hooks: [{ command: expect.stringMatching(OWN) }] })
     run(['uninstall', 'claude'], '', home)
     expect(JSON.parse(readFileSync(file, 'utf8')).hooks.PreToolUse).toEqual([other])
   })
@@ -195,8 +207,85 @@ describe('cli', () => {
       expect(run(['install', 'claude'], '', home), text).toBe(0)
       const written = JSON.parse(readFileSync(file, 'utf8'))
       expect(written.hooks.PreToolUse, text).toHaveLength(1)
-      expect(written.hooks.PreToolUse[0].hooks[0].command, text).toBe(`node '/opt/shell-secrets/cli.mjs' hook || exit 2`)
+      expect(written.hooks.PreToolUse[0].hooks[0].command, text).toMatch(OWN)
     }
+  })
+
+  it('runs a copy of the build that outlives the package and keeps each build apart', () => {
+    const home = mkdtempSync(join(tmpdir(), 'ss-'))
+    const from = fakeBuild('one')
+    run(['install', 'claude'], '', home, from)
+    const first = scriptOf(hookOf(join(home, '.claude/settings.json')))
+    expect(readdirSync(join(first, '..')).sort()).toEqual(['chunk.mjs', 'cli.mjs'])
+    rmSync(join(from, '..'), { recursive: true })
+    expect(readFileSync(first, 'utf8')).toBe(`import './chunk.mjs' // one`)
+    run(['install', 'codex'], '', home, fakeBuild('one'))
+    expect(hookOf(join(home, '.codex/hooks.json'))).toBe(hookOf(join(home, '.claude/settings.json')))
+    expect(scriptOf(hookOf(join(home, '.codex/hooks.json')))).toBe(first)
+    run(['install', 'claude'], '', home, fakeBuild('two'))
+    const second = scriptOf(hookOf(join(home, '.claude/settings.json')))
+    expect(second).not.toBe(first)
+    expect(existsSync(first)).toBe(true)
+    expect(readdirSync(join(home, '.shell-secrets'))).toHaveLength(3)
+    rmSync(second)
+    run(['install', 'claude'], '', home, fakeBuild('two'))
+    expect(readFileSync(second, 'utf8')).toBe(`import './chunk.mjs' // two`)
+    expect(readdirSync(join(home, '.shell-secrets'))).toHaveLength(3)
+  })
+
+  it('runs on the Node.js that installed it, falls back to PATH once that is gone, and blocks a hook that cannot start in Claude Code', () => {
+    const home = mkdtempSync(join(tmpdir(), 'ss-'))
+    vi.stubEnv('HOME', home)
+    const clean = JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'ls' } })
+    const pathBin = mkdtempSync(join(tmpdir(), 'ss-bin-'))
+    writeFileSync(join(pathBin, 'node'), '#!/bin/sh\necho path >&2\nexit 1\n', { mode: 0o755 })
+    const env = { HOME: home, PATH: `${pathBin}:/usr/bin:/bin` }
+    const build = join(mkdtempSync(join(tmpdir(), 'ss-build-')), 'cli.mjs')
+    writeFileSync(build, 'process.stdout.write(process.argv.slice(2).join(\' \'))\n')
+    for (const [node, status, stdout, stderr] of [[process.execPath, 0, 'hook', ''], [join(home, 'gone/node'), 2, '', 'path\n']] as const) {
+      main(['install', 'claude'], { stdin: () => '', script: build, execPath: node, node: 'v22.0.0', skills })
+      const hooks = JSON.parse(readFileSync(join(home, '.claude/settings.json'), 'utf8')).hooks.PreToolUse
+      expect(hooks).toHaveLength(1)
+      expect(hooks[0].hooks[0].onFailure).toBe('block')
+      const ran = spawnSync('sh', ['-c', hooks[0].hooks[0].command], { input: clean, env })
+      expect(ran.status, node).toBe(status)
+      expect(ran.stdout.toString()).toBe(stdout)
+      expect(ran.stderr.toString()).toBe(stderr)
+    }
+    main(['install', 'codex'], { stdin: () => '', script, execPath: process.execPath, node: 'v22.0.0', skills })
+    expect(JSON.parse(readFileSync(join(home, '.codex/hooks.json'), 'utf8')).hooks.PreToolUse[0].hooks[0]).not.toHaveProperty('onFailure')
+  })
+
+  it('refuses to replace a current that is not its link, and leaves no temporary link behind', () => {
+    const home = mkdtempSync(join(tmpdir(), 'ss-'))
+    mkdirSync(join(home, '.shell-secrets/current'), { recursive: true })
+    expect(run(['install', 'claude'], '', home)).toBe(1)
+    expect(errors.mock.lastCall?.[0]).toContain('is not the link install writes')
+    expect(readdirSync(join(home, '.shell-secrets')).filter(name => name.startsWith('current'))).toEqual(['current'])
+  })
+
+  it('refuses to install from an entry that is not a build', () => {
+    const home = mkdtempSync(join(tmpdir(), 'ss-'))
+    expect(run(['install', 'claude'], '', home, join(script, '../../src/cli.ts'))).toBe(1)
+    expect(run(['install', 'claude'], '', home, join(script, '../missing.mjs'))).toBe(1)
+    expect(existsSync(join(home, '.claude'))).toBe(false)
+  })
+
+  it('blocks the hook and refuses to install on a Node.js older than 22', () => {
+    const home = mkdtempSync(join(tmpdir(), 'ss-'))
+    vi.stubEnv('HOME', home)
+    const clean = JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'ls' } })
+    expect(main(['hook'], { stdin: () => clean, script, execPath: process.execPath, node: 'v20.20.2', skills })).toBe(2)
+    expect(errors.mock.lastCall?.[0]).toContain('Node.js 22 or later')
+    const reply = JSON.stringify({ hook_event_name: 'Stop', last_assistant_message: 'done' })
+    expect(main(['hook'], { stdin: () => reply, script, execPath: process.execPath, node: 'v20.20.2', skills })).toBe(1)
+    expect(main(['install', 'claude'], { stdin: () => '', script, execPath: process.execPath, node: 'v18.20.6', skills })).toBe(1)
+    expect(existsSync(join(home, '.claude'))).toBe(false)
+    expect(main(['hook'], { stdin: () => clean, script, execPath: process.execPath, node: 'node', skills })).toBe(2)
+    expect(main(['hook'], { stdin: () => clean, script, execPath: process.execPath, node: 'v22.13.1', skills })).toBe(0)
+    main(['install', 'claude'], { stdin: () => '', script, execPath: process.execPath, node: 'v22.13.1', skills })
+    expect(main(['uninstall', 'claude'], { stdin: () => '', script, execPath: process.execPath, node: 'v20.20.2', skills })).toBe(0)
+    expect(JSON.parse(readFileSync(join(home, '.claude/settings.json'), 'utf8')).hooks.PreToolUse).toBeUndefined()
   })
 
   it('writes the Codex matcher to hooks.json', () => {
@@ -267,7 +356,7 @@ describe('cli', () => {
       const stop = read(file).Stop!
       expect(stop).toHaveLength(2)
       expect(stop[0]).toEqual(other)
-      expect(stop[1]).toEqual({ hooks: [{ type: 'command', command: `node '/opt/shell-secrets/cli.mjs' hook`, timeout: 10, statusMessage: 'Checking the reply for credential slots' }] })
+      expect(stop[1]).toEqual({ hooks: [{ type: 'command', command: expect.stringMatching(/^n='.+'; \[ -x "\$n" \] \|\| n=node; "\$n" '.+\/\.shell-secrets\/current\/cli\.mjs' hook$/), timeout: 10, statusMessage: 'Checking the reply for credential slots' }] })
       expect(read(file).PreToolUse).toHaveLength(1)
       run(['uninstall', 'claude'], '', home)
       expect(read(file).Stop).toEqual([other])
@@ -280,6 +369,7 @@ describe('cli', () => {
       vi.spyOn(process, 'cwd').mockReturnValue(home)
       run(['install', 'claude'], '', home)
       run(['install', 'codex', '--project'], '', home)
+      rmSync(join(home, '.shell-secrets'), { recursive: true })
       for (const file of [join(home, '.claude/settings.json'), join(home, '.codex/hooks.json')]) {
         const { PreToolUse, Stop } = commands(file)
         expect(exit(PreToolUse!), PreToolUse).toBe(2)
@@ -335,7 +425,7 @@ describe('cli', () => {
     it('writes no hook when the skill cannot be installed', () => {
       const home = mkdtempSync(join(tmpdir(), 'ss-'))
       vi.stubEnv('HOME', home)
-      expect(main(['install', 'claude'], { stdin: () => '', script: '/opt/shell-secrets/cli.mjs', skills: join(home, 'missing') })).toBe(1)
+      expect(main(['install', 'claude'], { stdin: () => '', script, execPath: process.execPath, node: 'v22.0.0', skills: join(home, 'missing') })).toBe(1)
       expect(existsSync(join(home, '.claude/settings.json'))).toBe(false)
       const file = join(home, '.claude/settings.json')
       const before = JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'say done' }] }] } })
