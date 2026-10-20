@@ -5,7 +5,7 @@ export const AGENTS = {
 
 // The exact commands hookCommand writes, past and present, so a user hook that
 // merely mentions shell-secrets is never taken for one.
-export const OWN_HOOK = /^(?:node '(?:[^']|'\\'')*shell-secrets(?:[^']|'\\'')*\/cli\.mjs' hook|npx --no-install shell-secrets hook)(?: \|\| exit 2)?$/
+export const OWN_HOOK = /^(?:(?:node|n='(?:[^']|'\\'')*'; \[ -x "\$n" \] \|\| n=node; "\$n") '(?:[^']|'\\'')*shell-secrets(?:[^']|'\\'')*\/cli\.mjs' hook|npx --no-install shell-secrets hook)(?: \|\| exit 2)?$/
 
 export const USAGE = `Usage:
   shell-secrets install <claude|codex> [--project]   add the PreToolUse hook
