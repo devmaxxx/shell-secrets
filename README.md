@@ -36,6 +36,7 @@
   - [`findNewSecrets`](#findnewsecretsbefore-after-options)
   - [`findSecretsInCommand`](#findsecretsincommandcmd-options)
   - [`onlyWritesTo`](#onlywritestocmd-accept)
+  - [`findCredentialSlots`](#findcredentialslotstext)
   - [Custom and disabled rules](#custom-and-disabled-rules)
 - [Recipes](#recipes)
 - [Compared with other scanners](#compared-with-other-scanners)
@@ -55,6 +56,7 @@ Coding agents and CI bots run shell commands, and that is where secrets leak now
 
 - **Reads shell commands.** `findSecretsInCommand` reports secrets assigned or exported (`NAME=secret`), the files a command writes through `>`, `>>` or `tee`, the message files `git` / `gh` would publish, and the files `curl`, `scp` or `nc` would send off the machine.
 - **Built for agent tool calls.** `onlyWritesTo` answers "does this command only write the secret into an allowed file, such as a gitignored `.env`?".
+- **Catches credential slots.** `findCredentialSlots` finds the other half of the problem: a command with a stand-in for the user to type a secret into (`Authorization: Bearer <YOUR_TOKEN>`, `export API_KEY=your-key`, `--client-secret=<secret>`, `postgres://app:<password>@db`). The hook blocks one in a Bash call and sends back a reply that hands one to the user.
 - **Zero runtime dependencies.** ESM, fully typed, about 12 kB gzipped.
 - **Tuned for precision.** Placeholders (`ghp_xxxx…`, `<token>`, `example`), variable references (`${DB_PASSWORD}`) and local dev credentials (`postgres:postgres@localhost`) are not reported, so a hit is worth stopping for. Classic GitHub tokens must carry a valid CRC32 checksum, so made-up ones in docs and tests pass.
 - **Sees through base64.** A blob that decodes to text, such as a Kubernetes Secret value or an `echo … | base64 -d`, is decoded and scanned, nested encodings included; the finding spans the encoded text.
@@ -77,7 +79,7 @@ Requires Node.js 22 or later.
 
 ## Agent hooks
 
-The `shell-secrets` command installs a `PreToolUse` hook for [Claude Code](https://docs.anthropic.com/en/docs/claude-code/hooks) (`Bash`, `Write`, `Edit`, `MultiEdit`, `NotebookEdit`) or [Codex](https://developers.openai.com/codex/hooks) (`Bash`, `apply_patch`). It blocks a call that carries a new secret with exit code 2, which shows the masked finding to the agent.
+The `shell-secrets` command installs a `PreToolUse` hook for [Claude Code](https://docs.anthropic.com/en/docs/claude-code/hooks) (`Bash`, `Write`, `Edit`, `MultiEdit`, `NotebookEdit`) or [Codex](https://developers.openai.com/codex/hooks) (`Bash`, `apply_patch`). It blocks a call that carries a new secret with exit code 2, which shows the masked finding to the agent. It also blocks a Bash command with a [credential slot](#credential-slots), and installs a `Stop` hook that sends back a reply handing the user one, along with the [credential-handling skill](#the-credential-handling-skill) that tells the agent what to write instead.
 
 For Claude Code the hook is this entry in `settings.json`:
 
@@ -96,10 +98,24 @@ For Claude Code the hook is this entry in `settings.json`:
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node '/path/to/shell-secrets/dist/cli.mjs' hook",
+            "timeout": 10,
+            "statusMessage": "Checking the reply for credential slots"
+          }
+        ]
+      }
     ]
   }
 }
 ```
+
+The command tells the events apart by `hook_event_name`. Only the `PreToolUse` entry turns a hook that cannot start into exit 2: at `Stop` that would send every reply back, the retry included, and the agent could never stop.
 
 One command writes it for you:
 
@@ -107,15 +123,15 @@ One command writes it for you:
 npx shell-secrets install claude
 ```
 
-It writes to `~/.claude/settings.json`. The other forms:
+It writes to `~/.claude/settings.json` and copies the skill to `~/.claude/skills/credential-handling/`. The other forms:
 
 ```sh
-npx shell-secrets install codex    # ~/.codex/hooks.json; then trust it once in /hooks
-npx shell-secrets install claude --project   # .claude/settings.json, runs the repo's devDependency
+npx shell-secrets install codex    # ~/.codex/hooks.json and ~/.agents/skills/; then trust it once in /hooks
+npx shell-secrets install claude --project   # .claude/settings.json and .claude/skills/, runs the repo's devDependency
 npx shell-secrets uninstall claude
 ```
 
-Installing again replaces the earlier entry and leaves other hooks alone. A project install runs `npx --no-install shell-secrets hook || exit 2`, so add the package as a devDependency there; without it the hook blocks every call rather than letting them run unchecked.
+Installing again replaces the earlier entries and skill copy, and leaves other hooks alone. A project install runs `npx --no-install shell-secrets hook`, so add the package as a devDependency there; without it the hook blocks every tool call rather than letting them run unchecked.
 
 ### Examples
 
@@ -147,6 +163,25 @@ To try the hook without an agent, pipe it a tool call in the agent's JSON shape:
 echo '{"tool_name":"Bash","tool_input":{"command":"echo \"TOKEN=$TOKEN\" >> config.js"}}' \
   | npx shell-secrets hook; echo "exit $?"   # exit 0; a literal token gives exit 2
 ```
+
+### Credential slots
+
+An agent that cannot find a credential tends to hand the user a command with a slot to type it into. Whatever the user types lands in shell history and, run through Claude Code's `!`, in the transcript; and the agent usually could have found it on the machine. The hook treats the slot itself as the leak:
+
+| Where | Example | Result |
+| --- | --- | --- |
+| Bash call | `curl -H "Authorization: Bearer <YOUR_TOKEN>" https://api.github.com/user` | Blocked with exit 2: it would send the stand-in itself |
+| Bash call | `curl -H "Authorization: Bearer $(gh auth token)" https://api.github.com/user` | Passes: a reference the shell expands |
+| Bash call | `gh pr create --body-file - <<'EOF'` whose body quotes `export API_KEY=<your-key>` | Passes: a heredoc body or a comment is never run |
+| Reply | a fenced block with `export OPENAI_API_KEY=your-api-key` | Sent back with `{"decision":"block","reason":"…"}` to rewrite |
+| Reply | an inline `` `! psql postgres://app:<password>@db/app` `` | Sent back |
+| Reply | prose such as `` no more `export KEY=<your-key>` `` | Passes: an inline span without `!` talks about the pattern |
+
+Both messages tell the agent to pass the credential by reference (`$NAME`, `$(gh auth token)`, one key read from a gitignored `.env` in the same call, `$(security find-generic-password -s <service> -w)`) or to hand the user a no-echo login (`! gh auth login`, `! security add-generic-password -U -a "$USER" -s <service> -w`). A reply is sent back once: when `stop_hook_active` says the agent is already rewriting for a Stop hook, the next reply stands, so one that has to quote a slot to explain it cannot loop. Codex sends `Stop` with the same fields and reads the same answer, so it gets the entry too.
+
+### The credential-handling skill
+
+`install` copies [`skills/credential-handling`](./skills/credential-handling/SKILL.md) to the agent's skills directory: `~/.claude/skills/` for Claude Code, `~/.agents/skills/` for Codex, or the project's `.claude/skills/` / `.agents/skills/` with `--project`. The hook blocks a live secret and a slot; the skill says what to write instead: where credentials already live on the machine and how to check for one without printing it, how to pass one by reference, which no-echo login to hand the user when nothing holds it, and when to stop and name the missing credential. The copy carries a `.installed-by-shell-secrets` marker; install and uninstall leave a directory of the same name without it alone and say so.
 
 ### What passes
 
@@ -291,6 +326,28 @@ onlyWritesTo(`echo "GITHUB_TOKEN=${token}" >> .env`, path => path === '.env') //
 
 Only a lone `echo`, `printf` or `cat` with `>`, `>>` or `| tee` qualifies. A chained, substituted or otherwise piped command never does, nor does a target containing `~`, `$`, a glob or a backtick; `accept` is not called for those.
 
+### `findCredentialSlots(text)`
+
+Every place `text` leaves for the user to type a secret into, as a `CredentialSlot[]` ordered by position: a secret-named variable, key or flag (`OPENAI_API_KEY=`, `api_key:`, `--client-secret`, `--token <…>`) or an `Authorization` header set to a stand-in (`<token>`, `your-key`, `paste-here`, `xxxx`, `TOKEN_HERE`, `[password]`, `changeme`), and the password of a URL (`postgres://app:<password>@db`). A reference the shell expands (`$TOKEN`, `${TOKEN:-}`, `$(gh auth token)`), an empty value, a stand-in under a name that is no secret (`<project-id>`) or whose last word says it holds a path, an id, a URL or a number (`--token-file`, `--secret-id`, `TOKEN_URL`, `--max-tokens`, `--tokenizer`), a stand-in for a path or a number (`<path/to/key.json>`, `<N>`, `<url>`) or for a value already gone (`<redacted>`, `<empty>`), a type (`Promise<Token>`), a redirection (`< in > out`) and a regex class (`[a-z0-9]`) are not slots. A real-looking value is not one either; that is `findSecrets`' to report.
+
+```ts
+interface CredentialSlot {
+  start: number // text.slice(start, end) is the stand-in, e.g. '<YOUR_TOKEN>'
+  end: number
+  name: string | null // 'OPENAI_API_KEY', '--client-secret', 'Authorization'; null for a URL password
+  preview: string // 'Authorization: Bearer <YOUR_TOKEN>': no secret, so shown as written, up to 80 characters
+}
+```
+
+```ts
+findCredentialSlots('vercel deploy --token <token>')
+// [{ start: 22, end: 29, name: '--token', preview: '--token <token>' }]
+```
+
+### `findCredentialSlotsInCommand(cmd)`
+
+`findCredentialSlots` over a shell command, skipping comments, heredoc bodies (one inside `"$(cat <<'EOF' … EOF)"` too) and the arguments of a command that searches or edits text (`grep`, `rg`, `git grep`, `sed`, `awk`, `jq`, `yq`, `perl`): a PR body or commit message may quote the slot it is about, a pattern may look for one, and none of them runs. Offsets refer to `cmd`.
+
 ### `checkToolCall(call, env, options?)`
 
 The secrets an agent's tool call would leak. `call` is `{ kind: 'shell', command }`, `{ kind: 'write', path, content }`, `{ kind: 'edit', path, before, after }` or `{ kind: 'patch', patch }` (Codex `apply_patch`). `env.isIgnored(path)` says whether a file may hold a secret; `env.readFile(path)` returns a file's text or `null`. Writes into ignored files and secrets an edit only keeps return nothing.
@@ -301,7 +358,7 @@ The frozen, ordered list of built-in `Rule`s from the table above.
 
 ### Types
 
-`Finding`, `CommandFinding`, `CommandScan`, `Rule` and `ScanOptions` (`{ rules?: readonly Rule[] }`) are exported as types.
+`Finding`, `CommandFinding`, `CommandScan`, `CredentialSlot`, `Rule` and `ScanOptions` (`{ rules?: readonly Rule[] }`) are exported as types.
 
 ### Custom and disabled rules
 

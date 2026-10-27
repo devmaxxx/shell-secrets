@@ -1,7 +1,11 @@
 import type { ToolCall } from '../guard/check'
+import type { CredentialSlot } from '../types'
 import process from 'node:process'
 import { checkToolCall } from '../guard/check'
+import { findCredentialSlotsInCommand } from '../shell/slots'
+import { MAX_LISTED_SLOTS, SLOT_FIX } from './constants'
 import { gitEnv } from './git-env'
+import { findCredentialSlotsInReply } from './reply'
 
 // Claude Code and Codex share the hook protocol; they differ in tool names and
 // in Codex's apply_patch, which carries a whole patch instead of one file.
@@ -58,20 +62,51 @@ function editList(input: Record<string, unknown>): Record<string, unknown>[] {
 // blocks instead of passing unchecked.
 export function runHook(stdin: () => string): number {
   let findings
+  let slots: CredentialSlot[] = []
   try {
     const payload = record(JSON.parse(stdin()), 'payload')
+    if (payload.hook_event_name === 'Stop')
+      return checkReply(payload)
     const call = toToolCall(payload.tool_name, record(payload.tool_input, 'tool_input'))
     if (!call)
       return 0
     findings = checkToolCall(call, gitEnv(typeof payload.cwd === 'string' ? payload.cwd : process.cwd()))
+    if (call.kind === 'shell')
+      slots = findCredentialSlotsInCommand(call.command)
   }
   catch (error) {
     console.error(`Blocked by shell-secrets, it could not check the call: ${error instanceof Error ? error.message : String(error)}`)
     return 2
   }
-  if (findings.length === 0)
+  if (findings.length > 0) {
+    const list = findings.map(f => `${f.name} (${f.preview})${f.env ? `: use $${f.env}` : ''}`)
+    console.error(`Blocked by shell-secrets, the call contains a secret:\n${list.join('\n')}\nReference it through an environment variable, or write it only to a gitignored file such as .env.`)
+    return 2
+  }
+  if (slots.length > 0) {
+    console.error(`Blocked by shell-secrets, the command has a slot to type a credential into, so it would send the stand-in itself:\n${listSlots(slots)}\n${SLOT_FIX}`)
+    return 2
+  }
+  return 0
+}
+
+// A reply is no call that leaks anything, so the Stop hook never fails
+// closed: a message it cannot read lets the reply stand. Once the agent has
+// rewritten a reply for it, the next one may have to quote the slot it
+// explains, and sending that back too would loop.
+function checkReply(payload: Record<string, unknown>): number {
+  const reply = payload.last_assistant_message
+  if (payload.stop_hook_active === true || typeof reply !== 'string')
     return 0
-  const list = findings.map(f => `${f.name} (${f.preview})${f.env ? `: use $${f.env}` : ''}`)
-  console.error(`Blocked by shell-secrets, the call contains a secret:\n${list.join('\n')}\nReference it through an environment variable, or write it only to a gitignored file such as .env.`)
-  return 2
+  const slots = findCredentialSlotsInReply(reply)
+  if (slots.length > 0) {
+    const reason = `shell-secrets: this reply hands the user a command with a slot to type a credential into, which lands in shell history and, through \`!\`, in the transcript:\n${listSlots(slots)}\nRewrite it. ${SLOT_FIX}`
+    process.stdout.write(`${JSON.stringify({ decision: 'block', reason })}\n`)
+  }
+  return 0
+}
+
+function listSlots(slots: CredentialSlot[]): string {
+  const shown = slots.slice(0, MAX_LISTED_SLOTS).map(slot => slot.preview)
+  return [...shown, ...slots.length > MAX_LISTED_SLOTS ? [`${slots.length - MAX_LISTED_SLOTS} more`] : []].join('\n')
 }

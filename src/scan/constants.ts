@@ -17,3 +17,42 @@ export const MIN_LENGTH_TO_SHOW_PREFIX = 20
 export const BASE64_BLOB = /(?<![\w+/-])[\w+/-]{32,}={0,2}(?![\w+/=-])/g
 
 export const PRINTABLE = /^[\t\n\r\x20-\x7E]*$/
+
+// What a person is meant to overwrite by hand. `$NAME`, `${NAME}` and `$(cmd)`
+// are references the shell expands, so they never count. An angle-bracketed
+// stand-in neither starts nor ends with a blank, so the redirections in
+// `cmd < in > out` are not one; a bracketed one is letters only, so a regex
+// class such as `[a-z0-9]` or `[A-Z_]` is not one either.
+export const SLOT_VALUE = /["']?(<[^\s<>][^<>\n]*(?<!\s)>|\[[a-z][a-z_ ]*[a-z]\]|your[_-][\w-]*|paste[\w-]*|x{4,}|\w*_here(?![\w-])|changeme|replace[_-]?me)/iy
+
+// Every slot starts from a name, found as one maximal run of these, so no two
+// candidates share the characters a pattern scans: the search stays linear
+// on any input.
+export const SLOT_NAME = /[\w-]+/g
+// A secret word counts only where a word of the name ends with it, so
+// `tokenizer` and `max-tokens` name none.
+export const SECRET_WORD = /token|secret(?:key)?|passw(?:or)?d|pwd|api[_-]?key|access[_-]?key|private[_-]?key|credentials?/gi
+
+// The last word of a name says what its value is: `--token-file`, `TOKEN_URL`
+// and `--secret-id` take where a secret is or which one, not the secret.
+export const NOT_SECRET_TAILS = ['file', 'path', 'dir', 'id', 'url', 'uri', 'name', 'count', 'size', 'limit', 'length']
+
+// A stand-in for a path or a number is none the user types a secret into,
+// whatever the name: `GOOGLE_APPLICATION_CREDENTIALS=<path/to/key.json>`. Nor
+// is one for a value already gone, as in `password=<redacted>`.
+export const NOT_SECRET_STAND_IN = /^["']?[<[](?:(?:path|file|dir|url|uri|n|num|number|count|int|integer|size|limit)(?![a-z])|(?:redacted|empty|hidden|masked|omitted|removed|none|null|unset)[>\]])/i
+export const AUTH_HEADER = /authorization$/i
+
+// The scheme after the header name is optional, and blanks follow it only
+// when it is there: two optional runs of blanks in a row would try every split
+// of a long one.
+export const ASSIGNS = /["']?\s*[:=]\s*/y
+export const FLAG_GAP = /\s+/y
+export const HEADER_GAP = /\s*:\s*(?:(?:bearer|basic|token)\s+)?/iy
+
+// `scheme://user:<password>@`: the user part stops at the characters that
+// end it, so it is scanned once.
+export const URL_USER = /:\/\/([^\s:/@]+):/g
+export const URL_PASSWORD_END = /@/y
+
+export const MAX_SLOT_PREVIEW = 80
