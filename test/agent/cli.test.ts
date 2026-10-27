@@ -1,6 +1,6 @@
 import type { CliIO, HookPlugin } from 'agent-base-kit'
 import { spawnSync } from 'node:child_process'
-import { existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createCli } from 'agent-base-kit'
@@ -415,7 +415,22 @@ describe('cli', () => {
       expect(read(file).Stop).toEqual([other])
     })
 
-    it('replaces the entries a 0.2.x install wrote, leaving exactly one Stop entry, the one install writes now', async () => {
+    it('replaces the 0.2.1 PreToolUse entry from a checkout not named shell-secrets, and adds one Stop entry', async () => {
+      for (const path of ['/home/me/code/my-shell-secrets/dist/cli.mjs', '/home/me/code/shell-secrets-fork/dist/cli.mjs']) {
+        const home = mkdtempSync(join(tmpdir(), 'ss-'))
+        const file = join(home, '.claude/settings.json')
+        mkdirSync(join(home, '.claude'))
+        writeFileSync(file, JSON.stringify({ hooks: {
+          PreToolUse: [{ matcher: 'Bash|Write|Edit|MultiEdit|NotebookEdit', hooks: [{ type: 'command', command: `node '${path}' hook || exit 2`, timeout: 10, statusMessage: 'Scanning for secrets' }] }],
+        } }))
+        expect(await run(['install', 'claude'], '', home)).toBe(0)
+        const { PreToolUse, Stop } = read(file) as Record<string, { hooks: { command: string }[] }[]>
+        expect(PreToolUse!.map(e => e.hooks[0]!.command)).toEqual([expect.stringMatching(OWN)])
+        expect(Stop!.map(e => e.hooks[0]!.command)).toEqual([expect.stringMatching(/\/\.shell-secrets\/current\/cli\.mjs' hook$/)])
+      }
+    })
+
+    it('replaces the entries main\'s Stop-hook install wrote, leaving exactly one Stop entry, the one install writes now', async () => {
       const forms = [
         { at: (home: string) => join(home, '.claude/settings.json'), args: ['claude'], current: (home: string) => `n='/usr/bin/node'; [ -x "$n" ] || n=node; "$n" '${home}/.shell-secrets/current/cli.mjs' hook` },
         { at: (home: string) => join(home, '.codex/hooks.json'), args: ['codex', '--project'], current: () => 'npx --no-install shell-secrets hook' },
@@ -510,6 +525,20 @@ describe('cli', () => {
       writeFileSync(file, before)
       expect(await run(['install', 'claude'], '', home)).toBe(1)
       expect(readFileSync(file, 'utf8')).toBe(before)
+    })
+
+    it('leaves the hook on the build it ran before when the skill step fails', async () => {
+      const home = mkdtempSync(join(tmpdir(), 'ss-'))
+      const current = join(home, '.shell-secrets/current')
+      expect(await run(['install', 'claude'], '', home)).toBe(0)
+      const installed = readlinkSync(current)
+      const settings = readFileSync(join(home, '.claude/settings.json'), 'utf8')
+      rmSync(join(home, '.claude/skills'), { recursive: true })
+      writeFileSync(join(home, '.claude/skills'), 'not a directory')
+      expect(await run(['install', 'claude'], '', home, fakeBuild('next'))).toBe(1)
+      expect(stderr).toContain('.claude/skills')
+      expect(readlinkSync(current)).toBe(installed)
+      expect(readFileSync(join(home, '.claude/settings.json'), 'utf8')).toBe(settings)
     })
 
     it('stages the copy beside a directory of the staging name without touching it', async () => {
