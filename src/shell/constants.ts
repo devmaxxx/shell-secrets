@@ -186,6 +186,11 @@ export const HEREDOC_DELIMITER = new RegExp(String.raw`[ \t]*(${HEREDOC_WORD})`,
 
 export const REDIRECT_OPERATOR = /&?[<>]+[&|]?/y
 
+// Commands whose arguments are patterns and text: `grep "API_KEY=your-key"`
+// looks for that text and `sed 's/token=.*/token=<token>/'` edits it, and
+// neither hands a credential to anything.
+export const TEXT_SEARCH = new RegExp(`^\\s*${COMMAND_PREFIX}(?:git\\s+grep|[ef]?grep|rg|ag|ack|g?sed|[gm]?awk|jq|yq|perl)(?=\\s|$)`)
+
 export const FILE_READER = new RegExp(`^\\s*${COMMAND_PREFIX}(?:cat|head|tail)(?=\\s)`)
 
 export const HEREDOC_INTO_CAT = new RegExp(`^\\s*${COMMAND_PREFIX}cat(?:\\s+\\d?>>?\\s*\\S+)?\\s+<<-?[ \\t]*(?<word>${HEREDOC_WORD})`)

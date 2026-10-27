@@ -104,7 +104,7 @@ For Claude Code the hook is this entry in `settings.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "node '/path/to/shell-secrets/dist/cli.mjs' hook || exit 2",
+            "command": "node '/path/to/shell-secrets/dist/cli.mjs' hook",
             "timeout": 10,
             "statusMessage": "Checking the reply for credential slots"
           }
@@ -115,7 +115,7 @@ For Claude Code the hook is this entry in `settings.json`:
 }
 ```
 
-Both entries run the same command; it tells the events apart by `hook_event_name`.
+The command tells the events apart by `hook_event_name`. Only the `PreToolUse` entry turns a hook that cannot start into exit 2: at `Stop` that would send every reply back, the retry included, and the agent could never stop.
 
 One command writes it for you:
 
@@ -131,7 +131,7 @@ npx shell-secrets install claude --project   # .claude/settings.json and .claude
 npx shell-secrets uninstall claude
 ```
 
-Installing again replaces the earlier entries and skill copy, and leaves other hooks alone. A project install runs `npx --no-install shell-secrets hook || exit 2`, so add the package as a devDependency there; without it the hook blocks every call rather than letting them run unchecked.
+Installing again replaces the earlier entries and skill copy, and leaves other hooks alone. A project install runs `npx --no-install shell-secrets hook`, so add the package as a devDependency there; without it the hook blocks every tool call rather than letting them run unchecked.
 
 ### Examples
 
@@ -328,7 +328,7 @@ Only a lone `echo`, `printf` or `cat` with `>`, `>>` or `| tee` qualifies. A cha
 
 ### `findCredentialSlots(text)`
 
-Every place `text` leaves for the user to type a secret into, as a `CredentialSlot[]` ordered by position: a secret-named variable, key or flag (`OPENAI_API_KEY=`, `api_key:`, `--client-secret`, `--token <…>`) or an `Authorization` header set to a stand-in (`<token>`, `your-key`, `paste-here`, `xxxx`, `TOKEN_HERE`, `[password]`, `changeme`), and the password of a URL (`postgres://app:<password>@db`). A reference the shell expands (`$TOKEN`, `${TOKEN:-}`, `$(gh auth token)`), an empty value, a stand-in under a name that is no secret (`<project-id>`), a type (`Promise<Token>`), a redirection (`< in > out`) and a regex class (`[a-z0-9]`) are not slots. A real-looking value is not one either; that is `findSecrets`' to report.
+Every place `text` leaves for the user to type a secret into, as a `CredentialSlot[]` ordered by position: a secret-named variable, key or flag (`OPENAI_API_KEY=`, `api_key:`, `--client-secret`, `--token <…>`) or an `Authorization` header set to a stand-in (`<token>`, `your-key`, `paste-here`, `xxxx`, `TOKEN_HERE`, `[password]`, `changeme`), and the password of a URL (`postgres://app:<password>@db`). A reference the shell expands (`$TOKEN`, `${TOKEN:-}`, `$(gh auth token)`), an empty value, a stand-in under a name that is no secret (`<project-id>`) or whose last word says it holds a path, an id, a URL or a number (`--token-file`, `--secret-id`, `TOKEN_URL`, `--max-tokens`, `--tokenizer`), a stand-in for a path or a number (`<path/to/key.json>`, `<N>`, `<url>`) or for a value already gone (`<redacted>`, `<empty>`), a type (`Promise<Token>`), a redirection (`< in > out`) and a regex class (`[a-z0-9]`) are not slots. A real-looking value is not one either; that is `findSecrets`' to report.
 
 ```ts
 interface CredentialSlot {
@@ -346,7 +346,7 @@ findCredentialSlots('vercel deploy --token <token>')
 
 ### `findCredentialSlotsInCommand(cmd)`
 
-`findCredentialSlots` over a shell command, skipping heredoc bodies and comments: a PR body or commit message may quote the slot it is about, and neither runs. Offsets refer to `cmd`.
+`findCredentialSlots` over a shell command, skipping comments, heredoc bodies (one inside `"$(cat <<'EOF' … EOF)"` too) and the arguments of a command that searches or edits text (`grep`, `rg`, `git grep`, `sed`, `awk`, `jq`, `yq`, `perl`): a PR body or commit message may quote the slot it is about, a pattern may look for one, and none of them runs. Offsets refer to `cmd`.
 
 ### `checkToolCall(call, env, options?)`
 

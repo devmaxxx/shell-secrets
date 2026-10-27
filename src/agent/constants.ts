@@ -19,8 +19,9 @@ export const SKILL = 'credential-handling'
 // uninstall touch only one that holds this file, which install writes.
 export const SKILL_MARKER = '.installed-by-shell-secrets'
 
-// The exact commands hookCommand writes, past and present, so a user hook that
-// merely mentions shell-secrets is never taken for one.
+// The exact commands hookCommands writes, past and present, so a user hook that
+// merely mentions shell-secrets is never taken for one. The Stop one has no
+// `|| exit 2`.
 export const OWN_HOOK = /^(?:node '(?:[^']|'\\'')*shell-secrets(?:[^']|'\\'')*\/cli\.mjs' hook|npx --no-install shell-secrets hook)(?: \|\| exit 2)?$/
 
 export const USAGE = `Usage:

@@ -777,6 +777,8 @@ export function afterContinuations(cmd: string, at: number): number {
 
 export interface Heredoc {
   readonly body: string
+  /** Offset of the body's first line. */
+  readonly bodyAt: number
   /** Offset just past the terminator line. */
   readonly end: number
   /** A quoted delimiter keeps the body literal; a bare one expands `$(…)` in it. */
@@ -802,6 +804,7 @@ export function heredocAt(cmd: string, at: number): Heredoc | null {
   return {
     // The terminator line is the last one before `end`.
     body: cmd.slice(lineEnd + 1, cmd.lastIndexOf('\n', end - 1) + 1),
+    bodyAt: lineEnd + 1,
     end,
     quoted: word !== raw,
     rest: cmd.slice(delimiterEnd, lineEnd),

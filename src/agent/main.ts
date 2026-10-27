@@ -2,7 +2,7 @@ import { join } from 'node:path'
 import process from 'node:process'
 import { SKILL, USAGE } from './constants'
 import { runHook } from './hook'
-import { configFile, configure, hookCommand, installSkill, removeSkill, skillDir } from './install'
+import { assertSkillSource, configFile, configure, hookCommands, installSkill, keepingOnFailure, removeSkill, skillDir } from './install'
 
 /** What the command line needs from its process, passed in so tests can supply it. */
 export interface CliIO {
@@ -23,10 +23,21 @@ export function main(argv: string[], io: CliIO): number {
     const project = flags.includes('--project')
     const file = configFile(agent, project)
     const skill = skillDir(agent, project)
+    const source = join(io.skills, SKILL)
     let ours: boolean
     try {
-      configure(file, agent, command === 'install' ? hookCommand(io.script, project) : null)
-      ours = command === 'install' ? installSkill(join(io.skills, SKILL), skill) : removeSkill(skill)
+      if (command === 'install') {
+        // A failed skill step undoes the hooks, so install is all or nothing.
+        assertSkillSource(source)
+        ours = keepingOnFailure(file, () => {
+          configure(file, agent, hookCommands(io.script, project))
+          return installSkill(source, skill)
+        })
+      }
+      else {
+        configure(file, agent, null)
+        ours = removeSkill(skill)
+      }
     }
     catch (error) {
       console.error(`shell-secrets: ${(error as Error).message}`)

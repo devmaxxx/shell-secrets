@@ -9,9 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `findCredentialSlots(text)` and `findCredentialSlotsInCommand(cmd)`: the places a text or command leaves for the user to type a secret into (`Authorization: Bearer <YOUR_TOKEN>`, `export API_KEY=your-key`, `--client-secret=<secret>`, `postgres://app:<password>@db`), with offsets, the variable, flag or header they fill, and a preview. References the shell expands, redirections and regex classes are not slots.
-- The hook blocks a Bash command that carries a credential slot outside heredoc bodies and comments, and tells the agent to pass the credential by reference or hand the user a no-echo login.
-- A `Stop` hook for Claude Code and Codex: a reply whose fenced code blocks or `` `! …` `` spans hand the user a credential slot is sent back once to be rewritten. `install` writes the entry and `uninstall` removes it, with the same command as the `PreToolUse` entry.
+- `findCredentialSlots(text)` and `findCredentialSlotsInCommand(cmd)`: the places a text or command leaves for the user to type a secret into (`Authorization: Bearer <YOUR_TOKEN>`, `export API_KEY=your-key`, `--client-secret=<secret>`, `postgres://app:<password>@db`), with offsets, the variable, flag or header they fill, and a preview. References the shell expands, redirections, regex classes, names that hold a path, an id, a URL or a count (`--token-file`, `--secret-id`, `--max-tokens`), and stand-ins for a path, a number or a removed value (`<path>`, `<N>`, `<redacted>`) are not slots.
+- The hook blocks a Bash command that carries a credential slot outside heredoc bodies (including one inside `"$(cat <<'EOF' … )"`), comments and the arguments of a text search or edit (`grep`, `rg`, `sed`, `awk`, `jq`, `perl`), and tells the agent to pass the credential by reference or hand the user a no-echo login.
+- A `Stop` hook for Claude Code and Codex: a reply whose fenced code blocks or `` `! …` `` spans hand the user a credential slot is sent back once to be rewritten. `install` writes the entry and `uninstall` removes it. Unlike the `PreToolUse` entry it fails open, so a hook that cannot start never keeps the agent from stopping. An install whose skill step fails writes no hooks either.
 - The `credential-handling` skill ships in the package, and `install` copies it to `~/.claude/skills/` (Claude Code) or `~/.agents/skills/` (Codex), or the project's with `--project`. A directory of the same name that `install` did not write is left alone.
 
 ### Fixed

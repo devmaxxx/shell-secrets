@@ -19,6 +19,7 @@ describe('findCredentialSlots: a slot for the user to type a secret into', () =>
     ['a JSON key', '{ "apiKey": "your-key" }'],
     ['an npmrc auth line', 'npm config set //registry.npmjs.org/:_authToken=<token>'],
     ['a quoted export', 'export DB_PASSWORD="changeme"'],
+    ['a camel-cased secret key', 'secretKey: <your secret key>'],
   ]) {
     it(`finds ${name}`, () => {
       expect(findCredentialSlots(text!), text).not.toEqual([])
@@ -38,6 +39,15 @@ describe('findCredentialSlots: a slot for the user to type a secret into', () =>
     ['a regex character class after a secret name', `rg 'TOKEN=[A-Z_]+' .env.example`],
     ['a character class in a sed over a password line', `sed -E 's/password=[a-z0-9]+//' log.txt`],
     ['a real-looking value, which is findSecrets\' job', 'export API_KEY=sk_live_abc'],
+    ['a count of tokens', 'llm --max-tokens <N>'],
+    ['a tokenizer path', 'train --tokenizer <path>'],
+    ['a password file', 'mysql --password-file=<path>'],
+    ['a token file', 'vault login --token-file <path>'],
+    ['a secret id', 'aws secretsmanager get-secret-value --secret-id <secret-id>'],
+    ['a credentials file path', 'export GOOGLE_APPLICATION_CREDENTIALS=<path/to/key.json>'],
+    ['a token URL', 'TOKEN_URL=<url>'],
+    ['a camel-cased token file', 'tokenFile: <file>'],
+    ['a value already gone', 'password=<redacted> and api_key: <empty>'],
   ]) {
     it(`lets through ${name}`, () => {
       expect(findCredentialSlots(text!), text).toEqual([])

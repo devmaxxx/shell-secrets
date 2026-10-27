@@ -267,18 +267,26 @@ describe('cli', () => {
       const stop = read(file).Stop!
       expect(stop).toHaveLength(2)
       expect(stop[0]).toEqual(other)
-      expect(stop[1]).toEqual({ hooks: [{ type: 'command', command: `node '/opt/shell-secrets/cli.mjs' hook || exit 2`, timeout: 10, statusMessage: 'Checking the reply for credential slots' }] })
+      expect(stop[1]).toEqual({ hooks: [{ type: 'command', command: `node '/opt/shell-secrets/cli.mjs' hook`, timeout: 10, statusMessage: 'Checking the reply for credential slots' }] })
       expect(read(file).PreToolUse).toHaveLength(1)
       run(['uninstall', 'claude'], '', home)
       expect(read(file).Stop).toEqual([other])
     })
 
-    it('runs the same command as the PreToolUse entry, for Codex too', () => {
+    it('lets the agent stop when the hook cannot start, while PreToolUse still blocks', () => {
+      const commands = (file: string): Record<string, string> => Object.fromEntries(Object.entries(read(file) as Record<string, { hooks: { command: string }[] }[]>).map(([event, entries]) => [event, entries[0]!.hooks[0]!.command]))
+      const exit = (command: string): number | null => spawnSync('/bin/sh', ['-c', command], { env: { PATH: '/nonexistent' } }).status
       const home = mkdtempSync(join(tmpdir(), 'ss-'))
-      run(['install', 'codex'], '', home)
-      const hooks = read(join(home, '.codex/hooks.json')) as Record<string, { hooks: { command: string }[] }[]>
-      expect(hooks.Stop![0]!.hooks[0]!.command).toBe(hooks.PreToolUse![0]!.hooks[0]!.command)
-      run(['uninstall', 'codex'], '', home)
+      vi.spyOn(process, 'cwd').mockReturnValue(home)
+      run(['install', 'claude'], '', home)
+      run(['install', 'codex', '--project'], '', home)
+      for (const file of [join(home, '.claude/settings.json'), join(home, '.codex/hooks.json')]) {
+        const { PreToolUse, Stop } = commands(file)
+        expect(exit(PreToolUse!), PreToolUse).toBe(2)
+        expect(exit(Stop!), Stop).not.toBe(2)
+        expect(exit(Stop!), Stop).not.toBe(0)
+      }
+      run(['uninstall', 'codex', '--project'], '', home)
       expect(read(join(home, '.codex/hooks.json'))).toEqual({})
     })
   })
@@ -322,6 +330,30 @@ describe('cli', () => {
       expect(JSON.parse(readFileSync(join(home, '.claude/settings.json'), 'utf8')).hooks.PreToolUse).toHaveLength(1)
       expect(run(['uninstall', 'claude'], '', home)).toBe(0)
       expect(readFileSync(skill(home, '.claude/skills'), 'utf8')).toBe('mine')
+    })
+
+    it('writes no hook when the skill cannot be installed', () => {
+      const home = mkdtempSync(join(tmpdir(), 'ss-'))
+      vi.stubEnv('HOME', home)
+      expect(main(['install', 'claude'], { stdin: () => '', script: '/opt/shell-secrets/cli.mjs', skills: join(home, 'missing') })).toBe(1)
+      expect(existsSync(join(home, '.claude/settings.json'))).toBe(false)
+      const file = join(home, '.claude/settings.json')
+      const before = JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'say done' }] }] } })
+      mkdirSync(join(home, '.claude'))
+      writeFileSync(join(home, '.claude/skills'), 'not a directory')
+      writeFileSync(file, before)
+      expect(run(['install', 'claude'], '', home)).toBe(1)
+      expect(readFileSync(file, 'utf8')).toBe(before)
+    })
+
+    it('stages the copy beside a directory of the staging name without touching it', () => {
+      const home = mkdtempSync(join(tmpdir(), 'ss-'))
+      const neighbour = join(home, '.claude/skills', `credential-handling.${process.pid}`)
+      mkdirSync(neighbour, { recursive: true })
+      writeFileSync(join(neighbour, 'notes.md'), 'mine')
+      expect(run(['install', 'claude'], '', home)).toBe(0)
+      expect(readFileSync(join(neighbour, 'notes.md'), 'utf8')).toBe('mine')
+      expect(readFileSync(skill(home, '.claude/skills'), 'utf8')).toBe(readFileSync(join(skills, 'credential-handling/SKILL.md'), 'utf8'))
     })
 
     it('leaves a link in its place alone', () => {
