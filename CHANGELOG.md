@@ -17,7 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - The hook, `install` and `uninstall` run on [agent-base-kit](https://github.com/devmaxxx/agent-base-kit), bundled into the build, so the package still has no runtime dependencies. The installed entries are the same, and `install` and `uninstall` still find every form an earlier version wrote, including its `Stop` entry.
-- The hook blocks a payload that names no tool, instead of letting it run.
+- The hook blocks a payload that names no tool, is not a JSON object, or carries a `cwd` that is not a string, instead of letting it run or falling back to its own working directory.
+- A `MultiEdit` call is checked edit by edit, so a secret one edit moves out of another edit's old text still blocks.
 - `install` runs the copied build once before it writes the config, and refuses if the copy does not start.
 - `install` and `uninstall` refuse an unknown flag or an extra argument, instead of ignoring it, so a mistyped `--project` no longer falls back to the global config.
 - The config file is replaced in one rename, keeps its mode and stays a link when it is one, and an `uninstall` that finds no hook leaves it untouched.
