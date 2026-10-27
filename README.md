@@ -92,7 +92,7 @@ For Claude Code the hook is this entry in `settings.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "node '/path/to/shell-secrets/dist/cli.mjs' hook || exit 2",
+            "command": "node '/path/to/shell-secrets/dist/cli.mjs' hook --event PreToolUse --agent claude || exit 2",
             "timeout": 10,
             "statusMessage": "Scanning for secrets"
           }
@@ -104,7 +104,7 @@ For Claude Code the hook is this entry in `settings.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "node '/path/to/shell-secrets/dist/cli.mjs' hook",
+            "command": "node '/path/to/shell-secrets/dist/cli.mjs' hook --event Stop --agent claude",
             "timeout": 10,
             "statusMessage": "Checking the reply for credential slots"
           }
@@ -115,7 +115,7 @@ For Claude Code the hook is this entry in `settings.json`:
 }
 ```
 
-The command tells the events apart by `hook_event_name`. Only the `PreToolUse` entry turns a hook that cannot start into exit 2: at `Stop` that would send every reply back, the retry included, and the agent could never stop.
+`--event` names the event each entry runs for, so a `Stop` payload that arrives cut short lets the agent stop instead of being read as a blocked call; `--agent` says whose reply format to answer in (`codex` for Codex). A command without the flags still works and tells the events apart by `hook_event_name`, but then a payload it cannot parse blocks at every event. Only the `PreToolUse` entry turns a hook that cannot start into exit 2: at `Stop` that would send every reply back, the retry included, and the agent could never stop.
 
 One command writes it for you:
 
@@ -131,7 +131,7 @@ npx shell-secrets install claude --project   # .claude/settings.json and .claude
 npx shell-secrets uninstall claude
 ```
 
-Installing again replaces the earlier entries and skill copy, and leaves other hooks alone. A global install copies the hook into `~/.shell-secrets/<build>/`, points `~/.shell-secrets/current` at it, and runs it on the Node.js that ran `install` rather than the `node` first on PATH, which a project may pin to an older version. So it keeps working after `npx` clears its cache, after an nvm or Homebrew Node upgrade removes the old version's global packages, and while you rebuild a checkout of this repository; run `install` again to move the hook to a newer version. The command stays the same between versions installed by the same Node.js, so Codex keeps trusting it. Once the installing Node.js is gone the hook runs the `node` on PATH, and on one older than 22 it blocks every call with a message saying so, rather than running a check that is not tested there. In Claude Code the `PreToolUse` entry also sets `"onFailure": "block"` (Claude Code 2.1.295 or later), so a hook that cannot start or times out blocks the call too. Uninstalling leaves the copies in `~/.shell-secrets`, which you can delete; while a hook is installed, keep the one `current` points at, or every call blocks until you install again. A project install runs `npx --no-install shell-secrets hook || exit 2`, so add the package as a devDependency there; without it the hook blocks every call rather than letting them run unchecked.
+Installing again replaces the earlier entries and skill copy, and leaves other hooks alone. A global install copies the hook into `~/.shell-secrets/<build>/`, points `~/.shell-secrets/current` at it, and runs it on the Node.js that ran `install` rather than the `node` first on PATH, which a project may pin to an older version. So it keeps working after `npx` clears its cache, after an nvm or Homebrew Node upgrade removes the old version's global packages, and while you rebuild a checkout of this repository; run `install` again to move the hook to a newer version. The command stays the same between versions installed by the same Node.js, so Codex keeps trusting it; the first install after an upgrade from 0.2.x adds the `--event` and `--agent` flags, so Codex asks for trust once more. Once the installing Node.js is gone the hook runs the `node` on PATH, and on one older than 22 it blocks every call with a message saying so, rather than running a check that is not tested there. In Claude Code the `PreToolUse` entry also sets `"onFailure": "block"` (Claude Code 2.1.295 or later), so a hook that cannot start or times out blocks the call too. Uninstalling leaves the copies in `~/.shell-secrets`, which you can delete; while a hook is installed, keep the one `current` points at, or every call blocks until you install again. A project install runs `npx --no-install shell-secrets hook --event PreToolUse --agent <agent> || exit 2`, so add the package as a devDependency there; without it the hook blocks every call rather than letting them run unchecked.
 
 ### Examples
 

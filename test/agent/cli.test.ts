@@ -42,8 +42,8 @@ describe('cli', () => {
   const run = (args: string[], input = '', home = mkdtempSync(join(tmpdir(), 'ss-')), from = script, cwd = home): Promise<number> =>
     main(args, { stdin: () => input, home, script: from, cwd })
   const hookOf = (file: string): string => JSON.parse(readFileSync(file, 'utf8')).hooks.PreToolUse.at(-1).hooks[0].command
-  const OWN = /^n='.+'; \[ -x "\$n" \] \|\| n=node; "\$n" '.+\/\.shell-secrets\/current\/cli\.mjs' hook \|\| exit 2$/
-  const scriptOf = (command: string): string => realpathSync(command.slice(command.indexOf(`"$n" '`) + 6, -16))
+  const OWN = /^n='.+'; \[ -x "\$n" \] \|\| n=node; "\$n" '.+\/\.shell-secrets\/current\/cli\.mjs' hook --event PreToolUse --agent claude \|\| exit 2$/
+  const scriptOf = (command: string): string => realpathSync(command.slice(command.indexOf(`"$n" '`) + 6, command.lastIndexOf(`' hook `)))
 
   it('blocks a Claude Bash call and a Codex apply_patch call with exit 2, naming the secret', async () => {
     const bash = await run(['hook'], JSON.stringify({ tool_name: 'Bash', tool_input: { command: `export T=${fake.github()}` } }))
@@ -152,9 +152,9 @@ describe('cli', () => {
     mkdirSync(quoted, { recursive: true })
     await main(['install', 'claude'], { home: quoted })
     const command = hookOf(join(quoted, '.claude/settings.json'))
-    expect(spawnSync('sh', ['-c', `printf %s ${command.slice(command.lastIndexOf('"$n" ') + 5, -15)}`]).stdout.toString()).toBe(`${home}/cost$5/it's/.shell-secrets/current/cli.mjs`)
+    expect(spawnSync('sh', ['-c', `printf %s ${command.slice(command.lastIndexOf('"$n" ') + 5, command.lastIndexOf(' hook '))}`]).stdout.toString()).toBe(`${home}/cost$5/it's/.shell-secrets/current/cli.mjs`)
     await main(['install', 'codex', '--project'], { home, cwd: home })
-    expect(JSON.parse(readFileSync(join(home, '.codex/hooks.json'), 'utf8')).hooks.PreToolUse[0].hooks[0].command).toBe('npx --no-install shell-secrets hook || exit 2')
+    expect(JSON.parse(readFileSync(join(home, '.codex/hooks.json'), 'utf8')).hooks.PreToolUse[0].hooks[0].command).toBe('npx --no-install shell-secrets hook --event PreToolUse --agent codex || exit 2')
   })
 
   it('scans the ignored files a forced add of a directory or the whole tree stages', async () => {
@@ -266,7 +266,7 @@ describe('cli', () => {
     rmSync(join(from, '..'), { recursive: true })
     expect(readFileSync(first, 'utf8')).toBe(`import './chunk.mjs' // one`)
     await run(['install', 'codex'], '', home, fakeBuild('one'))
-    expect(hookOf(join(home, '.codex/hooks.json'))).toBe(hookOf(join(home, '.claude/settings.json')))
+    expect(hookOf(join(home, '.codex/hooks.json'))).toBe(hookOf(join(home, '.claude/settings.json')).replace('--agent claude', '--agent codex'))
     expect(scriptOf(hookOf(join(home, '.codex/hooks.json')))).toBe(first)
     await run(['install', 'claude'], '', home, fakeBuild('two'))
     const second = scriptOf(hookOf(join(home, '.claude/settings.json')))
@@ -297,7 +297,7 @@ describe('cli', () => {
       const ran = spawnSync('sh', ['-c', hooks[0].hooks[0].command], { input: clean, env })
       return { status: ran.status, stdout: ran.stdout.toString(), stderr: ran.stderr.toString() }
     }
-    expect(sh()).toEqual({ status: 0, stdout: 'hook', stderr: '' })
+    expect(sh()).toEqual({ status: 0, stdout: 'hook --event PreToolUse --agent claude', stderr: '' })
     rmSync(join(nodeDir, 'node'))
     expect(sh()).toEqual({ status: 2, stdout: '', stderr: 'path\n' })
     await main(['install', 'codex'], { home })
@@ -409,7 +409,7 @@ describe('cli', () => {
       const stop = read(file).Stop!
       expect(stop).toHaveLength(2)
       expect(stop[0]).toEqual(other)
-      expect(stop[1]).toEqual({ hooks: [{ type: 'command', command: expect.stringMatching(/^n='.+'; \[ -x "\$n" \] \|\| n=node; "\$n" '.+\/\.shell-secrets\/current\/cli\.mjs' hook$/), timeout: 10, statusMessage: 'Checking the reply for credential slots' }] })
+      expect(stop[1]).toEqual({ hooks: [{ type: 'command', command: expect.stringMatching(/^n='.+'; \[ -x "\$n" \] \|\| n=node; "\$n" '.+\/\.shell-secrets\/current\/cli\.mjs' hook --event Stop --agent claude$/), timeout: 10, statusMessage: 'Checking the reply for credential slots' }] })
       expect(read(file).PreToolUse).toHaveLength(1)
       await run(['uninstall', 'claude'], '', home)
       expect(read(file).Stop).toEqual([other])
@@ -426,7 +426,7 @@ describe('cli', () => {
         expect(await run(['install', 'claude'], '', home)).toBe(0)
         const { PreToolUse, Stop } = read(file) as Record<string, { hooks: { command: string }[] }[]>
         expect(PreToolUse!.map(e => e.hooks[0]!.command)).toEqual([expect.stringMatching(OWN)])
-        expect(Stop!.map(e => e.hooks[0]!.command)).toEqual([expect.stringMatching(/\/\.shell-secrets\/current\/cli\.mjs' hook$/)])
+        expect(Stop!.map(e => e.hooks[0]!.command)).toEqual([expect.stringMatching(/\/\.shell-secrets\/current\/cli\.mjs' hook --event Stop --agent claude$/)])
       }
     })
 
@@ -447,7 +447,7 @@ describe('cli', () => {
         expect(await run(['install', ...args], '', home)).toBe(0)
         const { PreToolUse, Stop } = read(file) as Record<string, { hooks: { command: string, statusMessage?: string }[] }[]>
         expect(PreToolUse).toHaveLength(1)
-        expect(Stop!.map(e => e.hooks[0]!.command)).toEqual(['say done', expect.stringMatching(/ hook$/)])
+        expect(Stop!.map(e => e.hooks[0]!.command)).toEqual(['say done', expect.stringMatching(/ hook --event Stop --agent (?:claude|codex)$/)])
         expect(Stop![1]!.hooks[0]!.statusMessage).toBe('Checking the reply for credential slots')
         expect(await run(['uninstall', ...args], '', home)).toBe(0)
         expect(read(file)).toEqual({ Stop: [entry('say done')] })
@@ -469,6 +469,19 @@ describe('cli', () => {
       }
       await run(['uninstall', 'codex', '--project'], '', home)
       expect(read(join(home, '.codex/hooks.json'))).toEqual({})
+    })
+  })
+
+  describe('a payload that arrives cut short', () => {
+    it('lets the agent stop through the installed Stop command, while the PreToolUse one blocks', async () => {
+      const home = mkdtempSync(join(tmpdir(), 'ss-'))
+      await run(['install', 'claude'], '', home, join(import.meta.dirname, '../../dist/cli.mjs'))
+      const hooks = JSON.parse(readFileSync(join(home, '.claude/settings.json'), 'utf8')).hooks as Record<string, { hooks: { command: string }[] }[]>
+      const sh = (command: string, input: string) => spawnSync('/bin/sh', ['-c', command], { input, encoding: 'utf8' })
+      const stop = sh(hooks.Stop![0]!.hooks[0]!.command, '{"hook_event_name":"Stop","last_assistant_message":"export API_KEY=<your')
+      expect(stop.status, stop.stderr).toBe(0)
+      expect(stop.stdout).toBe('')
+      expect(sh(hooks.PreToolUse![0]!.hooks[0]!.command, '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_in').status).toBe(2)
     })
   })
 

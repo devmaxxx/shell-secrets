@@ -16,7 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- The hook, `install` and `uninstall` run on [agent-base-kit](https://github.com/devmaxxx/agent-base-kit), bundled into the build, so the package still has no runtime dependencies. The installed entries are the same, and `install` and `uninstall` still find every form an earlier version wrote, including its `Stop` entry.
+- The hook, `install` and `uninstall` run on [agent-base-kit](https://github.com/devmaxxx/agent-base-kit), bundled into the build, so the package still has no runtime dependencies. `install` and `uninstall` still find every form an earlier version wrote, including its `Stop` entry.
+- The installed commands pass `--event` and `--agent` to the hook, so a `Stop` payload that arrives cut short lets the agent stop instead of blocking. The command changes once on upgrade, so Codex asks for trust again. A command without the flags still works.
 - The hook blocks a payload that names no tool, is not a JSON object, or carries a `cwd` that is not a string, instead of letting it run or falling back to its own working directory.
 - A `MultiEdit` call is checked edit by edit, so a secret one edit moves out of another edit's old text still blocks.
 - `install` runs the copied build once before it writes the config, and refuses if the copy does not start.
