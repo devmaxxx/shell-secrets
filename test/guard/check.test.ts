@@ -10,6 +10,10 @@ function env(files: Record<string, string> = {}): GuardEnv {
     readFile: path => files[path] ?? null,
   }
 }
+// A file system that can tell a file that is not there from one it cannot read.
+function withMissing(files: Record<string, string> = {}, unreadable: string[] = []): GuardEnv {
+  return { ...env(files), isMissing: path => !(path in files) && !unreadable.includes(path) }
+}
 const ids = (...args: Parameters<typeof checkToolCall>): string[] => checkToolCall(...args).map(f => f.ruleId)
 
 describe('checkToolCall', () => {
@@ -59,8 +63,41 @@ describe('checkToolCall', () => {
 
   it('blocks a message file it cannot read, unless the command writes it first', () => {
     expect(ids({ kind: 'shell', command: 'cd notes && gh issue create --body-file body.md' }, env())).toEqual(['unscanned-published-file'])
-    expect(ids({ kind: 'shell', command: 'gh issue create --body-file "$DIR/body.md"' }, env())).toEqual(['unscanned-published-file'])
     expect(ids({ kind: 'shell', command: 'echo fix > msg.txt && git commit -F msg.txt' }, env())).toEqual([])
+  })
+
+  it('lets a message file through that does not exist yet and that the command does not write', () => {
+    for (const command of ['gh pr edit 48 --body-file /tmp/s/pr48.md', 'git commit -F msg.txt'])
+      expect(ids({ kind: 'shell', command }, withMissing()), command).toEqual([])
+    // A file that is there but cannot be read is still unscanned.
+    expect(ids({ kind: 'shell', command: 'git commit -F msg.txt' }, withMissing({}, ['msg.txt']))).toEqual(['unscanned-published-file'])
+    expect(ids({ kind: 'shell', command: 'git commit -F msg.txt' }, withMissing({ 'msg.txt': fake.github() }))).toEqual(['github-token'])
+  })
+
+  it('lets through a file the command fills from a read of a PR or issue, not from local files', () => {
+    const edit = `python3 - <<'PY'\nopen('/tmp/s/pr48.md', 'a').write('more')\nPY`
+    for (const command of [
+      `gh pr view 48 --json body -q .body > /tmp/s/pr48.md && ${edit}\ngh pr edit 48 --body-file /tmp/s/pr48.md`,
+      'gh pr view 48 --json body -q .body > /tmp/s/pr48.md && gh pr edit 48 --body-file /tmp/s/pr48.md',
+      'gh api repos/o/r/issues/1 --jq .body > body.md && gh issue edit 1 --body-file body.md',
+    ])
+      expect(ids({ kind: 'shell', command }, withMissing()), command).toEqual([])
+    for (const command of [
+      'cat .env > /tmp/s/pr48.md && gh pr edit 48 --body-file /tmp/s/pr48.md',
+      'gh pr view 48 > m.md && cp .env m.md && gh pr edit 48 --body-file m.md',
+    ])
+      expect(ids({ kind: 'shell', command }, withMissing()), command).toEqual(['unscanned-published-file'])
+  })
+
+  it('resolves a message path from the command\'s own assignment, and passes one it never sets', () => {
+    const files = { '/tmp/s/body.md': `see ${fake.github()}`, '.env': `T=${fake.github()}` }
+    expect(ids({ kind: 'shell', command: 'S=/tmp/s; gh pr create --body-file "$S/body.md"' }, withMissing(files))).toEqual(['github-token'])
+    expect(ids({ kind: 'shell', command: 'export f=.env\ngit commit -F "$f"' }, withMissing(files))).toEqual(['github-token'])
+    expect(ids({ kind: 'shell', command: 'S=/tmp/s; gh pr create --body-file ${S}/other.md' }, withMissing(files))).toEqual([])
+    for (const command of ['gh pr create --body-file "$S/body.md"', 'git commit -F "$f"'])
+      expect(ids({ kind: 'shell', command }, withMissing(files)), command).toEqual([])
+    for (const command of ['f=$(ls *.md | head -1); git commit -F "$f"', 'f=$(cat .env); git commit -F "$f"'])
+      expect([...new Set(ids({ kind: 'shell', command }, withMissing(files)))], command).toEqual(['unscanned-published-file'])
   })
 
   it('does not carry an ignored file\'s exemption past a CRLF or unknown header', () => {

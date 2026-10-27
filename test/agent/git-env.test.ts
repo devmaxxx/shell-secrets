@@ -33,6 +33,16 @@ describe('gitEnv', () => {
       expect(env.readFile('/dev/zero')).toBeNull()
   })
 
+  it('tells a file that is not there from one that exists', () => {
+    const dir = repo()
+    writeFileSync(join(dir, 'msg.txt'), 'fix: x\n')
+    const env = gitEnv(dir)
+    expect(env.isMissing?.('nope.md')).toBe(true)
+    expect(env.isMissing?.('msg.txt/inside')).toBe(true)
+    expect(env.isMissing?.('msg.txt')).toBe(false)
+    expect(env.isMissing?.('.')).toBe(false)
+  })
+
   it('stops reading once the files read add up to more than a call may take', () => {
     const dir = repo()
     const size = MAX_FILE_BYTES / 2

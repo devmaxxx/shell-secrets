@@ -22,6 +22,12 @@ export interface GuardEnv {
    * listed. Without it, a forced add of a directory blocks the call.
    */
   listIgnored?: (path: string) => string[] | null
+  /**
+   * `true` when nothing exists at `path`. A file that is not there yet leaks
+   * nothing, unlike one that is there and cannot be read. Without it, every
+   * unreadable file counts as unscanned.
+   */
+  isMissing?: (path: string) => boolean
 }
 
 /**
@@ -61,6 +67,7 @@ function withinLookups(env: GuardEnv): GuardEnv {
   return {
     isIgnored: limited(path => env.isIgnored(path), false),
     readFile: path => env.readFile(path),
+    isMissing: env.isMissing && (path => env.isMissing?.(path) ?? false),
     listIgnored: env.listIgnored && limited(path => env.listIgnored?.(path) ?? null, null),
   }
 }
@@ -71,13 +78,18 @@ function unlessIgnored(path: string | undefined, found: Finding[], env: GuardEnv
   return found.length > 0 && path !== undefined && env.isIgnored(path) ? [] : found
 }
 
+// A variable the command never sets holds whatever the shell it runs in was
+// started with, which the hook cannot see and the agent cannot have chosen.
+const FROM_ENVIRONMENT = /^\$(?:[A-Z_]\w*|\{[A-Z_]\w*\})(?:\/[^$`*?[{~]*)?$/i
+const fromEnvironment = (file: string): boolean => FROM_ENVIRONMENT.test(file) && !/^\$(?:HOME|\{HOME\})\//.test(file)
+
 function checkShell(command: string, env: GuardEnv, options: ScanOptions): Finding[] {
   const scan = findSecretsInCommand(command, options)
   if (scan.findings.length > 0 && onlyWritesTo(command, path => env.isIgnored(path)))
     return []
   // git, gh and the uploaders (curl, scp, nc) send these files verbatim, so
-  // their contents are part of the call. One that cannot be read, or a source no
-  // file name pins down, blocks the call: letting it through would read an
+  // their contents are part of the call. One that is there but cannot be read, or
+  // a source no file name pins down, blocks the call: letting it through would read an
   // unscanned file as "no file".
   const unread: string[] = []
   const scanFile = (file: string): Finding[] => {
@@ -93,7 +105,10 @@ function checkShell(command: string, env: GuardEnv, options: ScanOptions): Findi
     const inside = env.listIgnored?.(file)
     if (inside)
       return inside.flatMap(scanFile)
-    unread.push(file)
+    // A file the command does not write and that is not there yet holds
+    // nothing to publish: the command fails on it, or a later one creates it.
+    if (!env.isMissing?.(file) && !fromEnvironment(file))
+      unread.push(file)
     return []
   })
   return [...scan.findings, ...published, ...unscanned([...unread, ...scan.unresolvedSources])]

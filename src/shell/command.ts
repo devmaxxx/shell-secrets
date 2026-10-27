@@ -8,6 +8,65 @@ import { opaqueSubstitutionAt, printedTexts, publicationOf } from './publish'
 
 interface Target { readonly at: number, readonly path: string }
 
+// A reply from GitHub holds nothing a local file could leak, so redirecting it
+// into a message file is not a way to smuggle one in.
+const REMOTE_READ = /^\s*gh\s+(?:(?:pr|issue|release|gist|repo|run)\s+(?:view|list|diff|checks)|api)(?=\s|$)/
+
+const ASSIGNMENT_ONLY = /^\s*(?:export\s+)?[A-Z_]\w*=\S*\s*$/i
+const INLINE_SCRIPT = /^\s*(?:python3?|node|ruby|perl)\s+(?:-\s+)?<<-?\s*(['"])\w+\1/
+
+// A quoted-heredoc script is text this command carries, and the secret scan
+// reads it; what it can do beyond that is open another file, which a string
+// that names a path (anything with a slash or an extension besides this
+// file's own name) gives away. One that does is not trusted.
+function editsOnlyThis(text: string, name: string): boolean {
+  if (!INLINE_SCRIPT.test(text))
+    return false
+  const strings = [...text.matchAll(/(['"])((?:(?!\1)[^\\\n])*)\1/g)].map(m => m[2]!)
+  return strings.every(value => value.endsWith(name) || !/[/\\]|^\.|\.\w{1,5}$/.test(value))
+}
+
+function isRemoteWrite(all: readonly Segment[], target: Target): boolean {
+  const writer = all.filter(segment => segment.start <= target.at && target.at < endOf(segment)).at(-1)
+  return writer !== undefined && REMOTE_READ.test(writer.text)
+}
+
+const HOME_PREFIX = /^(?:\$HOME|\$\{HOME\})\//
+const PLAIN_VARIABLE = /\$(?:\{([A-Z_]\w*)\}|([A-Z_]\w*))/gi
+
+/**
+ * A path of plain variables, read from the command's own assignments: the text
+ * once each is replaced by the word `before` ends with it set to. A variable
+ * set nowhere in the command comes from an environment this cannot see, so the
+ * path stays as written, and the caller finds no such file. `null` is a
+ * variable that something else than a plain word fills (a substitution, a loop
+ * or a function argument), whose path cannot be pinned down. Any other path
+ * with a `$` is left as written.
+ */
+function expandVariables(before: string, path: string): string | null {
+  const names = [...path.matchAll(PLAIN_VARIABLE)]
+  if (names.length === 0 || /[`~*?[{]/.test(path) || path.replace(PLAIN_VARIABLE, '').includes('$') || HOME_PREFIX.test(path))
+    return path
+  if (DEFINES_FUNCTION.test(before))
+    return null
+  let expanded = path
+  for (const [whole, braced, bare] of names) {
+    const name = (braced ?? bare)!
+    const word = new RegExp(`(?:^|[\\s;&|(])(?:export\\s+)?${name}=`, 'g')
+    const at = [...before.matchAll(word)].at(-1)
+    const rebinds = new RegExp(`\\b(?:for|select|read|mapfile|readarray|declare|typeset|local|unset)\\b[^;&|\\n]*\\b${name}\\b|printf\\s+-v\\s+${name}\\b`).test(before)
+    if (rebinds)
+      return null
+    if (!at)
+      return path
+    const value = /^(?:"([^"$`\\]*)"|'([^']*)'|([^\s;&|$`"'()\\<>*?[{~]*))(?=$|[\s;&|)])/.exec(before.slice(at.index + at[0].length))
+    if (!value)
+      return null
+    expanded = expanded.replace(whole, (value[1] ?? value[2] ?? value[3])!)
+  }
+  return expanded
+}
+
 /**
  * Every file the command writes through a redirect or `tee`, in order. The
  * operators are found on the scrubbed line, so a `>` or `tee` inside quotes is
@@ -291,11 +350,12 @@ function messageFiles(cmd: string, scrubbed: string, all: readonly Segment[], de
   // tracked. Built once: a long command line asks about many paths.
   let changers: (string | null)[] | undefined
   const changedBefore = (index: number, path: string): boolean => {
-    changers ??= all.map((segment, i) => found[i]!.publishes || FILE_READER.test(segment.text) || TEE.test(segment.text) || isLiteralStage(cmd, scrubbed, segment) ? null : textOf(cmd, segment))
+    changers ??= all.map((segment, i) => found[i]!.publishes || FILE_READER.test(segment.text) || TEE.test(segment.text) || isLiteralStage(cmd, scrubbed, segment) || ASSIGNMENT_ONLY.test(segment.text) || REMOTE_READ.test(segment.text) ? null : textOf(cmd, segment))
     const name = normalise(path).split('/').filter(Boolean).at(-1) ?? path
     for (let i = 0; i < index; i++) {
       // A command that holds this one in a substitution has not run yet.
-      if (endOf(all[i]!) <= all[index]!.start && changers[i]?.includes(name))
+      const text = changers[i]
+      if (endOf(all[i]!) <= all[index]!.start && text?.includes(name) && !editsOnlyThis(text, name))
         return true
     }
     return false
@@ -308,10 +368,21 @@ function messageFiles(cmd: string, scrubbed: string, all: readonly Segment[], de
       return
     }
     const publication = found[index]!
-    const place = (path: string, elsewhere: boolean): void => {
+    const place = (raw: string, elsewhere: boolean): void => {
+      let path = raw
+      if (raw.includes('$')) {
+        const expanded = expandVariables(cmd.slice(0, start), raw)
+        if (expanded === null) {
+          published.unresolved.push(raw)
+          return
+        }
+        path = expanded
+      }
       const writer = writes.filter(t => normalise(t.path) === normalise(path) && t.at < start).at(-1)
       if (changedBefore(index, path))
         published.unresolved.push(path)
+      else if (writer && isRemoteWrite(all, writer))
+        published.files.push(path)
       else if (writer)
         isLiteralWrite(cmd, scrubbed, all, writer) || published.unresolved.push(path)
       else if (elsewhere && !/^[/~]/.test(path))
