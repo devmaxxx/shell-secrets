@@ -14,6 +14,9 @@ importers:
       '@types/node':
         specifier: ^26.6.5
         version: 26.6.5
+      agent-base-kit:
+        specifier: link:../agent-kit-hook-events
+        version: link:../agent-kit-hook-events
       eslint:
         specifier: ^10.13.0
         version: 10.13.0

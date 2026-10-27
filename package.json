@@ -68,6 +68,7 @@
   "devDependencies": {
     "@antfu/eslint-config": "^9.5.1",
     "@types/node": "^26.6.5",
+    "agent-base-kit": "link:../agent-kit-hook-events",
     "eslint": "^10.13.0",
     "publint": "^0.3.25",
     "tsdown": "^0.23.1",

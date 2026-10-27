@@ -189,7 +189,7 @@ A secret is let through when it only lands in a file git ignores and does not tr
 
 ### A hook of your own
 
-`checkToolCall` holds the same policy:
+The `shell-secrets` command is a hook [built on agent-base-kit](https://github.com/devmaxxx/agent-base-kit), which reads the agent's payload, installs and uninstalls the entries and the skill, blocks a call it cannot check, and lets a reply stand when its `Stop` check cannot run. `checkToolCall` holds the policy, so another hook can use it:
 
 ```js
 import { checkToolCall } from 'shell-secrets'
