@@ -35,6 +35,16 @@ export function gitEnv(cwd: string): GuardEnv {
         return null
       }
     },
+    isMissing: (path) => {
+      try {
+        lstatSync(expand(cwd, path))
+        return false
+      }
+      catch (error) {
+        const { code } = error as NodeJS.ErrnoException
+        return code === 'ENOENT' || code === 'ENOTDIR'
+      }
+    },
     listIgnored: (path) => {
       const dir = expand(cwd, path)
       try {

@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A `Stop` hook for Claude Code and Codex: a reply whose fenced code blocks or `` `! …` `` spans hand the user a credential slot is sent back once to be rewritten. `install` writes the entry and `uninstall` removes it, with the same command as the `PreToolUse` entry.
 - The `credential-handling` skill ships in the package, and `install` copies it to `~/.claude/skills/` (Claude Code) or `~/.agents/skills/` (Codex), or the project's with `--project`. A directory of the same name that `install` did not write is left alone.
 
+### Fixed
+
+- The hook no longer blocks a message file that does not exist yet and that the command does not write, a file the command fills from a `gh pr view`, `gh issue view` or `gh api` redirect, or a path built from a variable the command never sets. A variable the command sets to a plain word is resolved, and one filled any other way still blocks. `GuardEnv` gains an optional `isMissing`.
+
+## [0.2.1] — 2026-10-19
 
 ### Added
 
