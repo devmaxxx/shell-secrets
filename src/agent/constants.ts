@@ -22,7 +22,7 @@ export const SKILL_MARKER = '.installed-by-shell-secrets'
 // The exact commands hookCommands writes, past and present, so a user hook that
 // merely mentions shell-secrets is never taken for one. The Stop one has no
 // `|| exit 2`.
-export const OWN_HOOK = /^(?:node '(?:[^']|'\\'')*shell-secrets(?:[^']|'\\'')*\/cli\.mjs' hook|npx --no-install shell-secrets hook)(?: \|\| exit 2)?$/
+export const OWN_HOOK = /^(?:(?:node|n='(?:[^']|'\\'')*'; \[ -x "\$n" \] \|\| n=node; "\$n") '(?:[^']|'\\'')*shell-secrets(?:[^']|'\\'')*\/cli\.mjs' hook|npx --no-install shell-secrets hook)(?: \|\| exit 2)?$/
 
 export const USAGE = `Usage:
   shell-secrets install <claude|codex> [--project]   add the PreToolUse and Stop hooks and the credential-handling skill
