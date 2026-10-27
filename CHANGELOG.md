@@ -5,7 +5,15 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.2.1] — 2026-10-19
+## [Unreleased]
+
+### Added
+
+- `findCredentialSlots(text)` and `findCredentialSlotsInCommand(cmd)`: the places a text or command leaves for the user to type a secret into (`Authorization: Bearer <YOUR_TOKEN>`, `export API_KEY=your-key`, `--client-secret=<secret>`, `postgres://app:<password>@db`), with offsets, the variable, flag or header they fill, and a preview. References the shell expands, redirections and regex classes are not slots.
+- The hook blocks a Bash command that carries a credential slot outside heredoc bodies and comments, and tells the agent to pass the credential by reference or hand the user a no-echo login.
+- A `Stop` hook for Claude Code and Codex: a reply whose fenced code blocks or `` `! …` `` spans hand the user a credential slot is sent back once to be rewritten. `install` writes the entry and `uninstall` removes it, with the same command as the `PreToolUse` entry.
+- The `credential-handling` skill ships in the package, and `install` copies it to `~/.claude/skills/` (Claude Code) or `~/.agents/skills/` (Codex), or the project's with `--project`. A directory of the same name that `install` did not write is left alone.
+
 
 ### Added
 
@@ -44,6 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `defaultRules`: 38 built-in rules for GitHub, GitLab, Atlassian, Figma, Slack, Discord, Linear, Anthropic, OpenAI, Google, Groq, xAI, Hugging Face, AWS, DigitalOcean, Stripe, SendGrid, Shopify, npm, PyPI, Telegram, private keys, age keys, database URIs and JWTs.
 - Custom rules through `{ rules }`, with `secretGroup`, `ignore`, `prepare` and `placeholders`.
 
+[Unreleased]: https://github.com/devmaxxx/shell-secrets/compare/v0.2.1...HEAD
 [0.2.1]: https://github.com/devmaxxx/shell-secrets/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/devmaxxx/shell-secrets/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/devmaxxx/shell-secrets/releases/tag/v0.1.0

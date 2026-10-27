@@ -90,3 +90,23 @@ export interface CommandScan {
    */
   readonly unresolvedSources: string[]
 }
+
+/**
+ * A place a command or text leaves for the user to type a secret into, such as
+ * `Authorization: Bearer <YOUR_TOKEN>` or `export API_KEY=your-key`. It holds
+ * no secret, only a stand-in, so the finding shows it as written.
+ */
+export interface CredentialSlot {
+  /** Offset of the stand-in's first character; `text.slice(start, end)` is the stand-in, e.g. `<YOUR_TOKEN>`. */
+  readonly start: number
+  /** Offset just past the stand-in's last character. */
+  readonly end: number
+  /**
+   * What the slot fills: the variable or key (`OPENAI_API_KEY`, `api_key`),
+   * the flag (`--client-secret`) or the header (`Authorization`). `null` for
+   * the password of a URL.
+   */
+  readonly name: string | null
+  /** The name and the stand-in as written, e.g. `--token <token>`, cut to 80 characters. */
+  readonly preview: string
+}

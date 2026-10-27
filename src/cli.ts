@@ -21,4 +21,4 @@ async function readStdin(): Promise<string> {
 
 const argv = process.argv.slice(2)
 const input = argv[0] === 'hook' ? await readStdin() : ''
-process.exitCode = main(argv, { stdin: () => input, script: fileURLToPath(import.meta.url) })
+process.exitCode = main(argv, { stdin: () => input, script: fileURLToPath(import.meta.url), skills: fileURLToPath(new URL('../skills', import.meta.url)) })

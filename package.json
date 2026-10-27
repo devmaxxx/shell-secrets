@@ -47,7 +47,8 @@
   },
   "files": [
     "CHANGELOG.md",
-    "dist"
+    "dist",
+    "skills"
   ],
   "engines": {
     "node": ">=22"
