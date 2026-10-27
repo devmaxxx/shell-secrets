@@ -5,6 +5,12 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- The hook no longer blocks a message file that does not exist yet and that the command does not write, a file the command fills from a `gh pr view`, `gh issue view` or `gh api` redirect, or a path built from a variable the command never sets. A variable the command sets to a plain word is resolved, and one filled any other way still blocks. `GuardEnv` gains an optional `isMissing`.
+
 ## [0.2.1] — 2026-10-19
 
 ### Added
