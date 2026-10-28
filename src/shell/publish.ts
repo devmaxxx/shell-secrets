@@ -1,5 +1,5 @@
 import type { Heredoc, Segment } from './parse'
-import { ANSI_C_STRING, ARGUMENTS_FROM_STDIN, CAT_HEREDOC, CLOSING_PAREN, COMMAND_RUNNERS, CURL_BODY, CURL_FILE_VALUE, CURL_GRAMMAR, ECHO_GUARD, ENV_VALUED_OPTION, FIELD_FROM_FILE, GH_ALIASES, GH_FIELD_OPTIONS, GH_GRAMMARS, GH_WRITES, GIT_GRAMMARS, GIT_PLACE_OPTION, GIT_VALUED_GLOBAL, HTTPIE_DATA, HTTPIE_FILE, HTTPIE_GRAMMAR, IDENTITY_ASSIGNMENT, IDENTITY_CONFIG, LEADING_EXPANSIONS, LITERAL_ECHO, LOGIN_OPTION, MAX_BRACE_WORDS, MAX_COMMAND_CANDIDATES, MAX_SPREAD_WORDS, NETCATS, PRINTED_WORDS, REDIRECT_OPERATOR, REMOTE_TARGET, RSYNC_GRAMMAR, RUNNER_COMMAND_OPTION, SCP_GRAMMAR, SHELL_COMMAND_OPTION, SHELL_STDIN_OPTION, SHELL_VALUED_LONG_OPTION, SHELLS, SPLIT_STRING_OPTION, UPLOADERS, WATCH_VALUED_OPTION, WGET_BODY, WGET_GRAMMAR } from './constants'
+import { ANSI_C_STRING, ARGUMENTS_FROM_STDIN, CAT_HEREDOC, CLOSING_PAREN, COMMAND_RUNNERS, CURL_BODY, CURL_FILE_VALUE, CURL_GRAMMAR, ECHO_GUARD, ENV_VALUED_OPTION, FIELD_FROM_FILE, GH_ALIASES, GH_FIELD_OPTIONS, GH_GRAMMARS, GH_WRITES, GIT_GRAMMARS, GIT_PLACE_OPTION, GIT_VALUED_GLOBAL, HTTPIE_DATA, HTTPIE_FILE, HTTPIE_GRAMMAR, IDENTITY_ASSIGNMENT, IDENTITY_CONFIG, LEADING_EXPANSIONS, LITERAL_ECHO, LOGIN_OPTION, MAX_BRACE_WORDS, MAX_COMMAND_CANDIDATES, MAX_SPREAD_WORDS, NETCATS, OVERRIDES_PRINTER, PRINTED_WORDS, REDIRECT_OPERATOR, REMOTE_TARGET, RSYNC_GRAMMAR, RUNNER_COMMAND_OPTION, SCP_GRAMMAR, SHELL_COMMAND_OPTION, SHELL_STDIN_OPTION, SHELL_VALUED_LONG_OPTION, SHELLS, SPLIT_STRING_OPTION, UPLOADERS, WATCH_VALUED_OPTION, WGET_BODY, WGET_GRAMMAR } from './constants'
 import { afterContinuations, codeEnd, decodeEscapes, endOf, heredocAt, pairsOf, skipBlanks, unquote, wordAt } from './parse'
 
 type LongOption = readonly [name: string, shortestPrefix: number, valued: boolean]
@@ -1060,13 +1060,15 @@ interface LiteralSubstitution {
 
 // What an echo or printf of plain and quoted words prints. zsh's echo reads
 // escapes without `-e`, so a word with a backslash is left unspelled, and
-// printf only when its format holds no conversion for the words to fill.
+// printf only when its format holds no conversion for the words to fill. A
+// quote keeps a brace or `~` from expanding, but not a glob in the output:
+// bash globs an unquoted substitution's words, and git a pathspec in any shell.
 function printedText(printer: string, words: string): string | undefined {
   const raw = words.match(PRINTED_WORDS) ?? []
-  if (raw.some(word => /[{*?[~]/.test(word.replace(/"[^"]*"|'[^']*'/g, ''))))
+  if (raw.some(word => /[{~]/.test(word.replace(/"[^"]*"|'[^']*'/g, ''))))
     return undefined
   const args = raw.map(unquote)
-  if (args.some(arg => arg.includes('\\')))
+  if (args.some(arg => /[\\*?[]/.test(arg)))
     return undefined
   if (printer === 'printf')
     return args[0] === undefined || /^-|%/.test(args[0]) ? undefined : args[0]
@@ -1104,7 +1106,8 @@ function literalSubstitution(cmd: string, at: number): LiteralSubstitution | nul
 
 /**
  * Walks the command and process substitutions between `from` and `to` that
- * stand outside single quotes. `visit` gets each one with whether it stands in
+ * stand outside single quotes. With `literals` false, as on a line that defines
+ * its own `echo` or `test`, none is literal. `visit` gets each one with whether it stands in
  * double quotes, and its literal reading or `null` when its output is unknown;
  * it returns `true` to stop. A literal one is stepped over, an unknown one into.
  *
@@ -1112,7 +1115,7 @@ function literalSubstitution(cmd: string, at: number): LiteralSubstitution | nul
  * bodies blanked, since an apostrophe in either would otherwise open a quote
  * that hides the code after it.
  */
-function walkSubstitutions(cmd: string, code: string, from: number, to: number, visit: (at: number, quoted: boolean, literal: LiteralSubstitution | null) => boolean): void {
+function walkSubstitutions(cmd: string, code: string, from: number, to: number, literals: boolean, visit: (at: number, quoted: boolean, literal: LiteralSubstitution | null) => boolean): void {
   let quoted = false
   for (let i = from; i < to; i++) {
     const c = code[i]!
@@ -1143,7 +1146,7 @@ function walkSubstitutions(cmd: string, code: string, from: number, to: number, 
       const open = afterContinuations(code, i + 1)
       if (code[open] !== '(')
         continue
-      const literal = code[open + 1] === '(' ? null : literalSubstitution(cmd, open + 1)
+      const literal = !literals || code[open + 1] === '(' ? null : literalSubstitution(cmd, open + 1)
       if (visit(i, quoted, literal))
         return
       if (literal)
@@ -1158,15 +1161,20 @@ function walkSubstitutions(cmd: string, code: string, from: number, to: number, 
  * none. It skips the literal `$(cat <<'EOF' … )` that agents write commit
  * messages with, a plain `$(echo …)`, and an echo behind a test.
  */
-export function opaqueSubstitutionAt(cmd: string, code: string, from: number, to: number): number {
+export function opaqueSubstitutionAt(cmd: string, code: string, from: number, to: number, literals = true): number {
   let found = -1
-  walkSubstitutions(cmd, code, from, to, (at, _quoted, literal) => {
+  walkSubstitutions(cmd, code, from, to, literals, (at, _quoted, literal) => {
     if (literal)
       return false
     found = at
     return true
   })
   return found
+}
+
+/** Whether `echo`, `printf` and `test` on this line are the shell's own, not a function it defines. */
+export function printsOwnText(code: string): boolean {
+  return !OVERRIDES_PRINTER.test(code)
 }
 
 /** A literal substitution and the texts the shell may put in its place. */
@@ -1185,7 +1193,9 @@ export interface Splice {
  */
 export function literalSplices(cmd: string, code: string): Splice[] {
   const splices: Splice[] = []
-  walkSubstitutions(cmd, code, 0, cmd.length, (start, quoted, literal) => {
+  if (!printsOwnText(code))
+    return splices
+  walkSubstitutions(cmd, code, 0, cmd.length, true, (start, quoted, literal) => {
     if (literal?.prints)
       splices.push({ start, end: literal.end, quoted, prints: literal.prints })
     return false

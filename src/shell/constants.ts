@@ -195,8 +195,8 @@ export const FILE_READER = new RegExp(`^\\s*${COMMAND_PREFIX}(?:cat|head|tail)(?
 
 export const HEREDOC_INTO_CAT = new RegExp(`^\\s*${COMMAND_PREFIX}cat(?:\\s+\\d?>>?\\s*\\S+)?\\s+<<-?[ \\t]*(?<word>${HEREDOC_WORD})`)
 
-// `tee file <<'EOF'` reads its own heredoc, not the pipe before it. Its
-// operands and redirects stand before the `<<` or after the delimiter.
+// `tee file <<'EOF'` reads its own heredoc. Its operands and redirects stand
+// before the `<<` or after the delimiter.
 export const HEREDOC_INTO_TEE = new RegExp(`^\\s*${COMMAND_PREFIX}tee(?:\\s+[^\\s<]\\S*)*\\s+<<-?[ \\t]*(?<word>${HEREDOC_WORD})`)
 
 // A `cat` that only forwards its stdin: no file operand but `-`, no heredoc and
@@ -212,6 +212,10 @@ export const LITERAL_STDIN = new RegExp(`^\\s*${COMMAND_PREFIX}(?:echo|printf)(?
 export const CHANGES_DIRECTORY = new RegExp(`^\\s*${COMMAND_PREFIX}(?:cd|pushd|popd)(?=\\s|$)`)
 
 export const INPUT_REDIRECT = /(?<![<\d])\d?<(?![<(&])[ \t]*/g
+
+// Every operator that feeds a command input: `<`, `0<`, `<<`, `<<<`, `<&`, `<>`.
+// The last one for stdin wins in bash, and zsh reads them all one after another.
+export const STDIN_OPERATOR = /(?<![<\d])\d*<(?!\()/g
 
 // `head -n 5` and `tail -n +2` count lines; the count is not a file.
 export const LINE_COUNT = /^[+-]?\d+[bkm]?$/i
@@ -236,7 +240,7 @@ export const MAX_SEGMENT_TEXT = 10 * MAX_COMMAND_LENGTH
 export const MAX_SCRIPT_DEPTH = 3
 
 // Each echo behind a test doubles the readings of a command, one with its text
-// and one without.
+// and one without. The bound is shared by the line and every script it runs.
 export const MAX_SPLICED_COMMANDS = 16
 
 // A double-quoted string ends at the next `"`, so a substitution in it that
@@ -470,7 +474,8 @@ export const CAT_HEREDOC = /[ \t]*cat[ \t]+<</y
 // A word of an echo whose text the command shows: plain characters and quoted
 // strings that expand nothing. A brace, a glob or `~` in it still expands
 // before echo prints it, so such a word passes here but is not spelled out.
-const PRINTED_WORD = String.raw`(?:[^\s$\u0060()<>|;&\\'"]|"[^"$\u0060\\]*"|'[^']*')+`
+// A `#` that starts a word opens a comment, which hides the `)` after it.
+const PRINTED_WORD = String.raw`(?!#)(?:[^\s$\u0060()<>|;&\\'"]|"[^"$\u0060\\]*"|'[^']*')+`
 
 export const LITERAL_ECHO = new RegExp(String.raw`[ \t]*(?<printer>echo|printf)(?<words>(?:[ \t]+${PRINTED_WORD})*)[ \t]*\)`, 'y')
 
@@ -480,9 +485,13 @@ export const PRINTED_WORDS = new RegExp(PRINTED_WORD, 'g')
 // prints the echo or nothing. The test may read a variable or a substitution of
 // its own: their output goes to the test, not to the substitution.
 const TESTED_EXPANSION = String.raw`\$(?:\w|\{\w+\}|\((?:[^()$\u0060'"\\]|'[^'()]*'|"[^"()$\u0060\\]*")*\))`
-const TESTED_WORD = String.raw`(?:[^\s$\u0060()<>|;&\\'"]|"(?:[^"$\u0060\\]|${TESTED_EXPANSION})*"|'[^']*'|${TESTED_EXPANSION})+`
+const TESTED_WORD = String.raw`(?!#)(?:[^\s$\u0060()<>|;&\\'"]|"(?:[^"$\u0060\\]|${TESTED_EXPANSION})*"|'[^']*'|${TESTED_EXPANSION})+`
 const TEST = String.raw`(?:\[\[(?:[ \t]+${TESTED_WORD})*?[ \t]+\]\]|\[(?:[ \t]+${TESTED_WORD})*?[ \t]+\]|test(?:[ \t]+${TESTED_WORD})*)`
 export const ECHO_GUARD = new RegExp(String.raw`[ \t]*(?:${TEST}[ \t]*(?:&&|\|\|)[ \t]*)+`, 'y')
+
+// A function of the same name runs in place of echo, printf or a test, so on a
+// line that defines one their output is unknown.
+export const OVERRIDES_PRINTER = /(?:^|[\s;&|(){}])(?:function\s+(?:echo|printf|test|\[\[?)(?=[\s(]|$)|(?:echo|printf|test|\[\[?)\s*\(\s*\))/
 
 export const CLOSING_PAREN = /\s*\)/y
 

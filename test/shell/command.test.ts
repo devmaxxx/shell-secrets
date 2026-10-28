@@ -704,6 +704,10 @@ describe('hostile command lines, in linear time', () => {
     within(1000, sized('[ "$(x)" = y ] && ', 'git tag $( ', 'echo -a ) v1'))
     within(1000, sized('[ a ] ', 'git tag $( ', '&& echo -a ) v1'))
     expect(scan(sized('$( [ x ] && echo -a ) ', 'git tag ', 'v1')).unresolved).toEqual([`a command with more than 16 readings of its echoes`])
+    // Every reading of the line reads its scripts again, so they share one bound.
+    const scripts = sized('bash -c \'git tag $([ a ] && echo -a) v1\'; ', 'git tag $([ a ] && echo -a) $([ b ] && echo -s) v1; ')
+    within(1000, scripts)
+    expect(scan(scripts).unresolved).toEqual([`a command with more than 16 readings of its echoes`])
   })
 
   it('blocks a line nested so deep that reading it would outlast the hook', () => {
