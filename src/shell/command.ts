@@ -2,11 +2,13 @@ import type { CommandFinding, CommandScan, ScanOptions } from '../types'
 import type { Segment } from './parse'
 import type { Publication, Script } from './publish'
 import { findSecrets } from '../scan/find'
-import { ASSIGNMENT_BEFORE, ASSIGNMENT_LOOKBEHIND, CAT_PASSTHROUGH, CHANGES_DIRECTORY, DEFINES_FUNCTION, EXPANDED_INLINE_INPUT, EXPANDS_VARIABLE, FILE_READER, HARMLESS_DEVICE, HARMLESS_REDIRECT, HEREDOC_INTO_CAT, IDENTITY_FROM_READER, INPUT_REDIRECT, LINE_COUNT, LITERAL_STDIN, MAX_COMMAND_LENGTH, MAX_PIPED_STAGES, MAX_SCRIPT_DEPTH, MAX_SEGMENT_TEXT, READING_SUBSTITUTION, READS_INTO_VARIABLE, REDIRECT, REDIRECT_OPERATOR, TEE } from './constants'
+import { ASSIGNMENT_BEFORE, ASSIGNMENT_LOOKBEHIND, CAT_PASSTHROUGH, CHANGES_DIRECTORY, DEFINES_FUNCTION, EXPANDED_INLINE_INPUT, EXPANDS_VARIABLE, FILE_READER, HARMLESS_DEVICE, HARMLESS_REDIRECT, HEREDOC_INTO_CAT, HEREDOC_INTO_TEE, IDENTITY_FROM_READER, INPUT_REDIRECT, LINE_COUNT, LITERAL_STDIN, MAX_COMMAND_LENGTH, MAX_PIPED_STAGES, MAX_SCRIPT_DEPTH, MAX_SEGMENT_TEXT, MAX_SPLICED_COMMANDS, READING_SUBSTITUTION, READS_INTO_VARIABLE, REDIRECT, REDIRECT_OPERATOR, STDIN_OPERATOR, TEE } from './constants'
 import { codeEnd, endOf, hasSubstitution, heredocAt, pairsOf, scrubShell, segments, skipBlanks, unquote, wordAt } from './parse'
-import { opaqueSubstitutionAt, printedTexts, publicationOf } from './publish'
+import { literalSplices, opaqueSubstitutionAt, printedTexts, printsOwnText, publicationOf } from './publish'
 
-interface Target { readonly at: number, readonly path: string }
+// `append`: `>>` or `tee -a` keeps what the file held, so a literal write
+// does not make its content known.
+interface Target { readonly at: number, readonly path: string, readonly append: boolean }
 
 // A reply from GitHub holds nothing a local file could leak, so redirecting it
 // into a message file is not a way to smuggle one in.
@@ -77,7 +79,7 @@ function writeTargets(cmd: string, scrubbed: string, all: readonly Segment[]): T
   const targets: Target[] = []
   for (const m of scrubbed.matchAll(REDIRECT)) {
     const at = m.index + m[0].length
-    targets.push({ at, path: unquote(wordAt(cmd, at)) })
+    targets.push({ at, path: unquote(wordAt(cmd, at)), append: m[0].includes('>>') })
   }
   const { closing } = pairsOf(scrubbed)
   for (const segment of all) {
@@ -87,6 +89,8 @@ function writeTargets(cmd: string, scrubbed: string, all: readonly Segment[]): T
     }
     let at = segment.start + tee[0].length
     let options = true
+    const segmentTargets: { at: number, path: string }[] = []
+    let append = false
     // A word is read up to here: a backquote that closes the substitution this
     // command is in would otherwise open a span that runs into the next one.
     const end = codeEnd(segment)
@@ -120,11 +124,15 @@ function writeTargets(cmd: string, scrubbed: string, all: readonly Segment[]): T
           options = false
         }
         else if (!options || !word.startsWith('-')) {
-          targets.push({ at, path: unquote(word) })
+          segmentTargets.push({ at, path: unquote(word) })
+        }
+        else if (/^-[^-]*a|^--ap/.test(unquote(word))) {
+          append = true
         }
         at += word.length
       }
     }
+    targets.push(...segmentTargets.map(t => ({ ...t, append })))
   }
   return targets
     .filter(t => !HARMLESS_DEVICE.test(t.path))
@@ -210,17 +218,35 @@ function isLiteralStage(cmd: string, scrubbed: string, stage: Segment): boolean 
   let source = stage
   // A loop, not a recursion: a pipe of a hundred thousand `cat`s must not
   // overflow the stack, and a stretch longer than the bound is read as unknown.
-  for (let hops = 0; passesStdinThrough(source); hops++) {
+  for (let hops = 0; ; hops++) {
     const { before } = source
-    if (hops >= MAX_PIPED_STAGES || !isPipedFrom(scrubbed, source, before))
+    const piped = isPipedFrom(scrubbed, source, before)
+    if (passesStdinThrough(source) && !ownHeredoc(cmd, source)) {
+      if (hops >= MAX_PIPED_STAGES || !piped)
+        return false
+      source = before
+      continue
+    }
+    const original = textOf(cmd, source)
+    if (LITERAL_STDIN.test(source.text))
+      return !/[$`]/.test(original)
+    if (!isLiteralHeredoc(cmd, source, original))
+      return false
+    // zsh feeds the pipe in ahead of the heredoc (MULTIOS), so what the pipe
+    // carries must be literal too.
+    if (!piped)
+      return true
+    if (hops >= MAX_PIPED_STAGES)
       return false
     source = before
   }
-  const original = textOf(cmd, source)
-  if (LITERAL_STDIN.test(source.text))
-    return !/[$`]/.test(original)
-  const heredoc = HEREDOC_INTO_CAT.exec(original)
-  if (heredoc === null)
+}
+
+// A heredoc into `cat` or `tee` that is the stage's only input: a later `<`,
+// `<<<` or second heredoc replaces it in bash and joins it in zsh.
+function isLiteralHeredoc(cmd: string, source: Segment, original: string): boolean {
+  const heredoc = HEREDOC_INTO_CAT.exec(original) ?? (ownHeredoc(cmd, source) ? HEREDOC_INTO_TEE.exec(original) : null)
+  if (heredoc === null || (source.text.match(STDIN_OPERATOR)?.length ?? 0) !== 1)
     return false
   const word = heredoc.groups!.word!
   if (unquote(word) !== word)
@@ -254,6 +280,11 @@ function stdinSource(cmd: string, scrubbed: string, segment: Segment, inherited?
       ]
     : []
   return files.length > 0 ? publishes(files) : publishes([], [cmd.slice(previous.start, endOf(segment)).trim()])
+}
+
+// The scrubbed text has a quoted `<<` blanked, so a file named `a <<b` is no heredoc.
+function ownHeredoc(cmd: string, stage: Segment): boolean {
+  return HEREDOC_INTO_TEE.test(stage.text) && HEREDOC_INTO_TEE.test(textOf(cmd, stage))
 }
 
 // A stage that hands its stdin on to the next unchanged, so a script printed
@@ -338,7 +369,7 @@ const UNTAINTED: Taint = { filled: false, expanded: false }
  * `stdin` is what a script's first reader would get from the wrapper that
  * runs it.
  */
-function messageFiles(cmd: string, scrubbed: string, all: readonly Segment[], depth = 0, taint = UNTAINTED, stdin?: () => Published): Published {
+function messageFiles(cmd: string, scrubbed: string, all: readonly Segment[], readings: Readings, depth = 0, taint = UNTAINTED, stdin?: () => Published): Published {
   const found = all.map(segment => publicationOf(cmd, scrubbed, segment))
   const writes = writeTargets(cmd, scrubbed, all)
   const published = publishes()
@@ -378,16 +409,16 @@ function messageFiles(cmd: string, scrubbed: string, all: readonly Segment[], de
         }
         path = expanded
       }
-      const writer = writes.filter(t => normalise(t.path) === normalise(path) && t.at < start).at(-1)
-      if (changedBefore(index, path))
+      const writers = writes.filter(t => normalise(t.path) === normalise(path) && t.at < start)
+      const content = writers.length > 0 ? writtenContent(cmd, scrubbed, all, writers) : undefined
+      // A literal write's text is in the command, scanned already.
+      if (changedBefore(index, path) || content === 'unknown')
         published.unresolved.push(path)
-      else if (writer && isRemoteWrite(all, writer))
+      else if (content === 'disk')
         published.files.push(path)
-      else if (writer)
-        isLiteralWrite(cmd, scrubbed, all, writer) || published.unresolved.push(path)
-      else if (elsewhere && !/^[/~]/.test(path))
+      else if (content === undefined && elsewhere && !/^[/~]/.test(path))
         published.unresolved.push(path)
-      else
+      else if (content === undefined)
         published.files.push(path)
     }
     let inherited: Published | undefined
@@ -401,7 +432,7 @@ function messageFiles(cmd: string, scrubbed: string, all: readonly Segment[], de
     ]
     for (const { script, stdin: scriptStdin, writer } of scripts) {
       // The script's own text cannot show what a variable it reads was set to.
-      const inner = depth < MAX_SCRIPT_DEPTH ? scriptFiles(script.text, depth + 1, hidden.passedBy(segment, script, writer), scriptStdin) : publishes([], [script.text.trim()])
+      const inner = depth < MAX_SCRIPT_DEPTH ? scriptFiles(script.text, readings, depth + 1, hidden.passedBy(segment, script, writer), scriptStdin) : publishes([], [script.text.trim()])
       published.unresolved.push(...inner.unresolved)
       inner.files.forEach(path => place(path, moved || publication.elsewhere))
     }
@@ -423,10 +454,35 @@ function messageFiles(cmd: string, scrubbed: string, all: readonly Segment[], de
   return published
 }
 
-function scriptFiles(script: string, depth: number, taint: Taint, stdin: (() => Published) | undefined): Published {
-  const scrubbed = scrubShell(script)
-  const all = stretchesOf(scrubbed)
-  return all ? messageFiles(script, scrubbed, all, depth, taint, stdin) : publishes([], [script.trim()])
+// How many more spliced readings one scan may make. It is shared by every
+// script the command runs: each reading of the line reads its scripts again,
+// so per-script caps would multiply.
+interface Readings { left: number }
+
+function scriptFiles(script: string, readings: Readings, depth: number, taint: Taint, stdin: (() => Published) | undefined): Published {
+  const read = (text: string): Published => {
+    const scrubbed = scrubShell(text)
+    const all = stretchesOf(scrubbed)
+    return all ? messageFiles(text, scrubbed, all, readings, depth, taint, stdin) : publishes([], [text.trim()])
+  }
+  return withSplicedReadings(script, readings, read(script), read)
+}
+
+// What a literal echo prints is read as part of the command, in a script run
+// by `bash -c` or `eval` as at the top, so each reading of it is read as well.
+function withSplicedReadings(cmd: string, readings: Readings, published: Published, read: (reading: string) => Published): Published {
+  const spliced = splicedCommands(cmd)
+  if (spliced === undefined || spliced.length > readings.left) {
+    published.unresolved.push(`a command with more than ${MAX_SPLICED_COMMANDS} readings of its echoes`)
+    return published
+  }
+  readings.left -= spliced.length
+  for (const reading of spliced) {
+    const more = read(reading)
+    published.files.push(...more.files)
+    published.unresolved.push(...more.unresolved)
+  }
+  return published
 }
 
 interface HiddenContent {
@@ -451,13 +507,14 @@ function hiddenContent(cmd: string, scrubbed: string, { filled, expanded }: Tain
   let firstReading: number | undefined
   let firstIdentity: number | undefined
   const definesFunction = DEFINES_FUNCTION.test(scrubbed)
+  const literals = printsOwnText(scrubbed)
   // Comments and heredoc bodies are blanked: an apostrophe in one is no quote.
   // In text that was expanded before it got here, a single quote protects nothing.
   const codeOf = (): string => code ??= expanded ? scrubShell(cmd, 'quotes').replaceAll('\'', ' ') : scrubShell(cmd, 'quotes')
   // Single quotes and escapes too: `'costs $5'` expands nothing.
   const expandingOf = (): string => expanding ??= scrubShell(cmd, expanded ? 'quotes' : 'double')
   // Up to the segment's end, which is where a backquote that closes the command's own substitution stands.
-  const substitutes = (segment: Segment, from = segment.start): boolean => opaqueSubstitutionAt(cmd, codeOf(), from, endOf(segment)) >= 0
+  const substitutes = (segment: Segment, from = segment.start): boolean => opaqueSubstitutionAt(cmd, codeOf(), from, endOf(segment), literals) >= 0
   const expands = (segment: Segment, from = segment.start): boolean => EXPANDS_VARIABLE.test(expandingOf().slice(from, endOf(segment)))
   const readsBefore = (until: number): boolean => {
     if (firstRead === undefined) {
@@ -471,7 +528,7 @@ function hiddenContent(cmd: string, scrubbed: string, { filled, expanded }: Tain
       return true
     }
     const until = definesFunction ? cmd.length : offset
-    firstSubstitution ??= opaqueSubstitutionAt(cmd, codeOf(), 0, cmd.length)
+    firstSubstitution ??= opaqueSubstitutionAt(cmd, codeOf(), 0, cmd.length, literals)
     return (firstSubstitution >= 0 && firstSubstitution < until) || readsBefore(until)
   }
   // The author and committer of a commit are published with it, and are set
@@ -506,11 +563,55 @@ function hiddenContent(cmd: string, scrubbed: string, { filled, expanded }: Tain
   }
 }
 
+// What a file holds after the writes to it, latest first: an append keeps what
+// was there, so a run of literal appends leaves the disk's bytes in it.
+function writtenContent(cmd: string, scrubbed: string, all: readonly Segment[], writers: readonly Target[]): 'literal' | 'disk' | 'unknown' {
+  for (let i = writers.length - 1; i >= 0; i--) {
+    const writer = writers[i]!
+    if (isRemoteWrite(all, writer))
+      return 'disk'
+    if (!isLiteralWrite(cmd, scrubbed, all, writer))
+      return 'unknown'
+    if (!writer.append)
+      return 'literal'
+  }
+  return 'disk'
+}
+
 // The innermost stretch the redirect stands in: `cat .env $(echo x) > msg` is
 // the `cat`, not the `echo` that starts later but ends before the `>`.
 function isLiteralWrite(cmd: string, scrubbed: string, all: readonly Segment[], target: Target): boolean {
   const writer = all.filter(segment => segment.start <= target.at && target.at < endOf(segment)).at(-1)
   return writer !== undefined && isLiteralStage(cmd, scrubbed, writer)
+}
+
+// The shell splits an unquoted substitution's output into words and globs
+// them, and expands nothing else in it; in double quotes the output is one word.
+function spelled(text: string, quoted: boolean): string {
+  if (quoted)
+    return text.replace(/["\\$`]/g, '\\$&')
+  return text.split(/\s+/).filter(Boolean).map(word => word.replace(/[^\w@%+=:,./*?[\]-]/g, '\\$&')).join(' ')
+}
+
+/**
+ * The command with each literal `$(echo …)` replaced by what it may print, one
+ * string per combination; `[]` when it holds none, and `undefined` when the
+ * combinations are too many to read.
+ */
+function splicedCommands(cmd: string): string[] | undefined {
+  const splices = literalSplices(cmd, scrubShell(cmd, 'quotes'))
+  if (splices.length === 0)
+    return []
+  let readings = ['']
+  let at = 0
+  for (const { start, end, quoted, prints } of splices) {
+    if (readings.length * prints.length > MAX_SPLICED_COMMANDS)
+      return undefined
+    const before = cmd.slice(at, start)
+    readings = readings.flatMap(reading => prints.map(text => reading + before + spelled(text, quoted)))
+    at = end
+  }
+  return readings.map(reading => reading + cmd.slice(at))
 }
 
 function assignedVariable(cmd: string, start: number): string | undefined {
@@ -545,7 +646,12 @@ export function findSecretsInCommand(cmd: string, options: ScanOptions = {}): Co
   if (!all) {
     return { findings, redirectTargets: [], messageFiles: [], unresolvedSources: ['a command nested too deeply to read'] }
   }
-  const published = messageFiles(cmd, scrubbed, all)
+  const readings: Readings = { left: MAX_SPLICED_COMMANDS }
+  const published = withSplicedReadings(cmd, readings, messageFiles(cmd, scrubbed, all, readings), (reading) => {
+    const words = scrubShell(reading)
+    const stretches = stretchesOf(words)
+    return stretches ? messageFiles(reading, words, stretches, readings) : publishes([], [reading.trim()])
+  })
   return {
     findings,
     redirectTargets: writeTargets(cmd, scrubbed, all).map(t => t.path).filter(path => path !== ''),

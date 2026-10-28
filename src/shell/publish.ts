@@ -1,5 +1,5 @@
 import type { Heredoc, Segment } from './parse'
-import { ANSI_C_STRING, ARGUMENTS_FROM_STDIN, CAT_HEREDOC, CLOSING_PAREN, COMMAND_RUNNERS, CURL_BODY, CURL_FILE_VALUE, CURL_GRAMMAR, ENV_VALUED_OPTION, FIELD_FROM_FILE, GH_ALIASES, GH_FIELD_OPTIONS, GH_GRAMMARS, GH_WRITES, GIT_GRAMMARS, GIT_PLACE_OPTION, GIT_VALUED_GLOBAL, HTTPIE_DATA, HTTPIE_FILE, HTTPIE_GRAMMAR, IDENTITY_ASSIGNMENT, IDENTITY_CONFIG, LEADING_EXPANSIONS, LITERAL_ECHO, LOGIN_OPTION, MAX_BRACE_WORDS, MAX_COMMAND_CANDIDATES, MAX_SPREAD_WORDS, NETCATS, REDIRECT_OPERATOR, REMOTE_TARGET, RSYNC_GRAMMAR, RUNNER_COMMAND_OPTION, SCP_GRAMMAR, SHELL_COMMAND_OPTION, SHELL_STDIN_OPTION, SHELL_VALUED_LONG_OPTION, SHELLS, SPLIT_STRING_OPTION, UPLOADERS, WATCH_VALUED_OPTION, WGET_BODY, WGET_GRAMMAR } from './constants'
+import { ANSI_C_STRING, ARGUMENTS_FROM_STDIN, CAT_HEREDOC, CLOSING_PAREN, COMMAND_RUNNERS, CURL_BODY, CURL_FILE_VALUE, CURL_GRAMMAR, ECHO_GUARD, ENV_VALUED_OPTION, FIELD_FROM_FILE, GH_ALIASES, GH_FIELD_OPTIONS, GH_GRAMMARS, GH_WRITES, GIT_GRAMMARS, GIT_PLACE_OPTION, GIT_VALUED_GLOBAL, HTTPIE_DATA, HTTPIE_FILE, HTTPIE_GRAMMAR, IDENTITY_ASSIGNMENT, IDENTITY_CONFIG, LEADING_EXPANSIONS, LITERAL_ECHO, LOGIN_OPTION, MAX_BRACE_WORDS, MAX_COMMAND_CANDIDATES, MAX_SPREAD_WORDS, NETCATS, OVERRIDES_PRINTER, PRINTED_WORDS, REDIRECT_OPERATOR, REMOTE_TARGET, RSYNC_GRAMMAR, RUNNER_COMMAND_OPTION, SCP_GRAMMAR, SHELL_COMMAND_OPTION, SHELL_STDIN_OPTION, SHELL_VALUED_LONG_OPTION, SHELLS, SPLIT_STRING_OPTION, UPLOADERS, WATCH_VALUED_OPTION, WGET_BODY, WGET_GRAMMAR } from './constants'
 import { afterContinuations, codeEnd, decodeEscapes, endOf, heredocAt, pairsOf, skipBlanks, unquote, wordAt } from './parse'
 
 type LongOption = readonly [name: string, shortestPrefix: number, valued: boolean]
@@ -1047,32 +1047,75 @@ function publicationFrom(cmd: string, scrubbed: string, segment: Segment, spoken
   return netcat ?? NOTHING
 }
 
-// The offset after a `$(…)` whose output is text the command already shows,
-// a quoted heredoc or a plain echo, or -1 when its output is unknown.
-function literalSubstitutionEnd(cmd: string, at: number): number {
+/** A `$(…)` whose output is text the command already shows. */
+interface LiteralSubstitution {
+  /** The offset after its closing paren. */
+  readonly end: number
+  /**
+   * Every text it may print, or `undefined` when the shell would have to
+   * expand a word to tell: a heredoc, a brace, a glob or an escape.
+   */
+  readonly prints: readonly string[] | undefined
+}
+
+// What an echo or printf of plain and quoted words prints. zsh's echo reads
+// escapes without `-e`, so a word with a backslash is left unspelled, and
+// printf only when its format holds no conversion for the words to fill. A
+// quote keeps a brace or `~` from expanding, but not a glob in the output:
+// bash globs an unquoted substitution's words, and git a pathspec in any shell.
+function printedText(printer: string, words: string): string | undefined {
+  const raw = words.match(PRINTED_WORDS) ?? []
+  if (raw.some(word => /[{~]/.test(word.replace(/"[^"]*"|'[^']*'/g, ''))))
+    return undefined
+  const args = raw.map(unquote)
+  if (args.some(arg => /[\\*?[]/.test(arg)))
+    return undefined
+  if (printer === 'printf')
+    return args[0] === undefined || /^-|%/.test(args[0]) ? undefined : args[0]
+  let first = 0
+  while (first < args.length && /^-[neE]+$/.test(args[first]!))
+    first++
+  return args.slice(first).join(' ')
+}
+
+function literalSubstitution(cmd: string, at: number): LiteralSubstitution | null {
   CAT_HEREDOC.lastIndex = at
   if (CAT_HEREDOC.test(cmd)) {
     const doc = heredocAt(cmd, CAT_HEREDOC.lastIndex)
     if (!doc || doc.rest.trim() !== '' || (!doc.quoted && /\$\(|`/.test(doc.body)))
-      return -1
+      return null
     CLOSING_PAREN.lastIndex = doc.end
-    return CLOSING_PAREN.test(cmd) ? CLOSING_PAREN.lastIndex : -1
+    return CLOSING_PAREN.test(cmd) ? { end: CLOSING_PAREN.lastIndex, prints: undefined } : null
   }
-  LITERAL_ECHO.lastIndex = at
-  return LITERAL_ECHO.test(cmd) ? LITERAL_ECHO.lastIndex : -1
+  ECHO_GUARD.lastIndex = at
+  const guarded = ECHO_GUARD.test(cmd)
+  LITERAL_ECHO.lastIndex = guarded ? ECHO_GUARD.lastIndex : at
+  const echo = LITERAL_ECHO.exec(cmd)
+  if (!echo)
+    return null
+  const { printer, words } = echo.groups as { printer: string, words: string }
+  const text = printedText(printer, words)
+  // A guarded echo is let through only when what it prints is known, so the
+  // words it may add to the command are read; a bare one keeps what earlier
+  // versions let through, quotes and escapes aside.
+  if (text === undefined && (guarded || /['"\\]/.test(words)))
+    return null
+  const prints = text === undefined ? undefined : guarded ? ['', text] : [text]
+  return { end: LITERAL_ECHO.lastIndex, prints }
 }
 
 /**
- * The offset of the first command or process substitution between `from` and
- * `to` whose output is unknown, outside single quotes, or -1 when there is
- * none. It skips the literal `$(cat <<'EOF' … )` that agents write commit
- * messages with.
+ * Walks the command and process substitutions between `from` and `to` that
+ * stand outside single quotes. With `literals` false, as on a line that defines
+ * its own `echo` or `test`, none is literal. `visit` gets each one with whether it stands in
+ * double quotes, and its literal reading or `null` when its output is unknown;
+ * it returns `true` to stop. A literal one is stepped over, an unknown one into.
  *
  * It follows quotes itself, over `code`: `cmd` with its comments and heredoc
  * bodies blanked, since an apostrophe in either would otherwise open a quote
  * that hides the code after it.
  */
-export function opaqueSubstitutionAt(cmd: string, code: string, from: number, to: number): number {
+function walkSubstitutions(cmd: string, code: string, from: number, to: number, literals: boolean, visit: (at: number, quoted: boolean, literal: LiteralSubstitution | null) => boolean): void {
   let quoted = false
   for (let i = from; i < to; i++) {
     const c = code[i]!
@@ -1096,17 +1139,66 @@ export function opaqueSubstitutionAt(cmd: string, code: string, from: number, to
       quoted = !quoted
     }
     else if (c === '`' || (!quoted && (c === '<' || c === '>') && code[i + 1] === '(')) {
-      return i
+      if (visit(i, quoted, null))
+        return
     }
     else if (c === '$') {
       const open = afterContinuations(code, i + 1)
       if (code[open] !== '(')
         continue
-      const after = code[open + 1] === '(' ? -1 : literalSubstitutionEnd(cmd, open + 1)
-      if (after < 0)
-        return i
-      i = after - 1
+      const literal = !literals || code[open + 1] === '(' ? null : literalSubstitution(cmd, open + 1)
+      if (visit(i, quoted, literal))
+        return
+      if (literal)
+        i = literal.end - 1
     }
   }
-  return -1
+}
+
+/**
+ * The offset of the first command or process substitution between `from` and
+ * `to` whose output is unknown, outside single quotes, or -1 when there is
+ * none. It skips the literal `$(cat <<'EOF' … )` that agents write commit
+ * messages with, a plain `$(echo …)`, and an echo behind a test.
+ */
+export function opaqueSubstitutionAt(cmd: string, code: string, from: number, to: number, literals = true): number {
+  let found = -1
+  walkSubstitutions(cmd, code, from, to, literals, (at, _quoted, literal) => {
+    if (literal)
+      return false
+    found = at
+    return true
+  })
+  return found
+}
+
+/** Whether `echo`, `printf` and `test` on this line are the shell's own, not a function it defines. */
+export function printsOwnText(code: string): boolean {
+  return !OVERRIDES_PRINTER.test(code)
+}
+
+/** A literal substitution and the texts the shell may put in its place. */
+export interface Splice {
+  readonly start: number
+  readonly end: number
+  readonly quoted: boolean
+  readonly prints: readonly string[]
+}
+
+/**
+ * The literal substitutions whose output can be spelled out. What one prints
+ * becomes words of the command: `git tag $(echo -F msg) v1` reads `msg` as
+ * surely as `git tag -F msg v1`, so a caller reads the command again with each
+ * spelled in.
+ */
+export function literalSplices(cmd: string, code: string): Splice[] {
+  const splices: Splice[] = []
+  if (!printsOwnText(code))
+    return splices
+  walkSubstitutions(cmd, code, 0, cmd.length, true, (start, quoted, literal) => {
+    if (literal?.prints)
+      splices.push({ start, end: literal.end, quoted, prints: literal.prints })
+    return false
+  })
+  return splices
 }
