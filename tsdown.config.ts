@@ -5,4 +5,10 @@ export default defineConfig({
   dts: true,
   exports: true,
   publint: true,
+  // A global install runs a copy of dist with no node_modules beside it, so
+  // agent-base-kit is bundled in and the output may import no package.
+  deps: {
+    alwaysBundle: ['agent-base-kit'],
+    onlyImport: [],
+  },
 })

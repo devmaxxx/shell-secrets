@@ -14,6 +14,9 @@ importers:
       '@types/node':
         specifier: ^26.6.5
         version: 26.6.5
+      agent-base-kit:
+        specifier: ^0.3.0
+        version: 0.3.0
       eslint:
         specifier: ^10.13.0
         version: 10.13.0
@@ -591,6 +594,10 @@ packages:
     resolution: {integrity: sha512-oJlA3XiRm7Cyk6qFD2Jn8ak9B7jSy0qy00ADO3+8dpT0LSjFihQYv4C02LFCSYJV3Q37xYwwRy5m+IpIiUzqWw==}
     engines: {node: '>=0.4.0'}
     hasBin: true
+
+  agent-base-kit@0.3.0:
+    resolution: {integrity: sha512-OsaVoKJ4pLxGEctTVLFPQZTIdUPvYk6AIs5GUX0aHXy3MTlhFnhQNALxTk2jGZ7+OqMXX9X1/mm6DDa4FICX4Q==}
+    engines: {node: '>=22'}
 
   ajv@6.15.0:
     resolution: {integrity: sha512-fgFx7Hfoq60ytK2c7DhnF8jIvzYgOMxfugjLOSMHjLIPgenqa7S7oaagATUq99mV6IYvN2tRmC0wnTYX6iPbMw==}
@@ -2452,6 +2459,8 @@ snapshots:
       acorn: 8.19.0
 
   acorn@8.19.0: {}
+
+  agent-base-kit@0.3.0: {}
 
   ajv@6.15.0:
     dependencies:

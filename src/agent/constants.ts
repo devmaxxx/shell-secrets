@@ -1,17 +1,13 @@
-export const AGENTS = {
-  claude: { dir: '.claude', file: 'settings.json', matcher: 'Bash|Write|Edit|MultiEdit|NotebookEdit', skills: '.claude/skills' },
-  codex: { dir: '.codex', file: 'hooks.json', matcher: 'Bash|apply_patch', skills: '.agents/skills' },
-} as const
-
-// Both agents send Stop with `last_assistant_message` and `stop_hook_active`,
-// and take `{"decision":"block"}` on stdout as "rewrite the reply". Stop has no
-// matcher in either.
-export const EVENTS = ['PreToolUse', 'Stop'] as const
+// Where each agent looks for a skill, under the home directory or the project.
+export const SKILL_DIRS = { claude: '.claude/skills', codex: '.agents/skills' } as const
 
 export const STATUS = {
   PreToolUse: 'Scanning for secrets',
   Stop: 'Checking the reply for credential slots',
 } as const
+
+// Seconds the agent waits for each hook entry.
+export const HOOK_TIMEOUT_S = 10
 
 export const SKILL = 'credential-handling'
 
@@ -19,15 +15,12 @@ export const SKILL = 'credential-handling'
 // uninstall touch only one that holds this file, which install writes.
 export const SKILL_MARKER = '.installed-by-shell-secrets'
 
-// The exact commands hookCommands writes, past and present, so a user hook that
-// merely mentions shell-secrets is never taken for one. The Stop one has no
-// `|| exit 2`.
+// Every command shell-secrets wrote before it ran on agent-base-kit, which the
+// kit's own forms miss when the path is not a directory named exactly
+// shell-secrets (a fork, a checkout called my-shell-secrets), so install
+// replaces and uninstall removes them. A user hook that merely mentions
+// shell-secrets is never taken for one. The Stop one has no `|| exit 2`.
 export const OWN_HOOK = /^(?:(?:node|n='(?:[^']|'\\'')*'; \[ -x "\$n" \] \|\| n=node; "\$n") '(?:[^']|'\\'')*shell-secrets(?:[^']|'\\'')*\/cli\.mjs' hook|npx --no-install shell-secrets hook)(?: \|\| exit 2)?$/
-
-export const USAGE = `Usage:
-  shell-secrets install <claude|codex> [--project]   add the PreToolUse and Stop hooks and the credential-handling skill
-  shell-secrets uninstall <claude|codex> [--project] remove them
-  shell-secrets hook                                 run as the hook (reads the tool call or the reply on stdin)`
 
 export const SLOT_FIX = 'Pass the credential by reference instead: $NAME, $(gh auth token), one key read from a gitignored .env in the same call, $(security find-generic-password -s <service> -w). If nothing on the machine holds it, hand the user a no-echo login to run: `! gh auth login`, or `! security add-generic-password -U -a "$USER" -s <service> -w`. The credential-handling skill has the details.'
 
@@ -42,8 +35,8 @@ export const MAX_LISTED_SLOTS = 3
 
 export const MAX_FORCED_FILES = 2000
 
-// The caller lets a call run unchecked once the hook's timeout passes (10 s in
-// the entry `install` writes), so the work stops short of it. What is left
+// The caller lets a call run unchecked once the hook's timeout passes
+// (HOOK_TIMEOUT_S), so the work stops short of it. What is left
 // undone answers as the check that blocks.
 export const TIME_BUDGET_MS = 6000
 

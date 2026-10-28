@@ -14,11 +14,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A `Stop` hook for Claude Code and Codex: a reply whose fenced code blocks or `` `! …` `` spans hand the user a credential slot is sent back once to be rewritten. `install` writes the entry and `uninstall` removes it. Unlike the `PreToolUse` entry it fails open, so a hook that cannot start never keeps the agent from stopping. An install whose skill step fails writes no hooks either.
 - The `credential-handling` skill ships in the package, and `install` copies it to `~/.claude/skills/` (Claude Code) or `~/.agents/skills/` (Codex), or the project's with `--project`. A directory of the same name that `install` did not write is left alone.
 
+### Changed
+
+- The hook, `install` and `uninstall` run on [agent-base-kit](https://github.com/devmaxxx/agent-base-kit), bundled into the build, so the package still has no runtime dependencies. `install` and `uninstall` still find every form an earlier version wrote, including its `Stop` entry.
+- The installed commands pass `--event` and `--agent` to the hook, so a `Stop` payload that arrives cut short lets the agent stop instead of blocking. The command changes once on upgrade, so Codex asks for trust again. A command without the flags still works.
+- The hook blocks a payload that names no tool, is not a JSON object, or carries a `cwd` that is not a string, instead of letting it run or falling back to its own working directory.
+- A `MultiEdit` call is checked edit by edit, so a secret one edit moves out of another edit's old text still blocks.
+- `install` runs the copied build once before it writes the config, and refuses if the copy does not start.
+- `install` and `uninstall` refuse an unknown flag or an extra argument, instead of ignoring it, so a mistyped `--project` no longer falls back to the global config.
+- The config file is replaced in one rename, keeps its mode and stays a link when it is one, and an `uninstall` that finds no hook leaves it untouched.
+- `install` and `uninstall` print the skill step on a line of its own after the config file.
+
 ### Fixed
 
 - The hook no longer blocks a message file that does not exist yet and that the command does not write, a file the command fills from a `gh pr view`, `gh issue view` or `gh api` redirect, or a path built from a variable the command never sets. A variable the command sets to a plain word is resolved, and one filled any other way still blocks. `GuardEnv` gains an optional `isMissing`.
 - A global `install` no longer points the hook at the installing package, whose path an nvm or Homebrew Node upgrade, an `npx` cache clean or a rebuild removes or changes; it copies the build to `~/.shell-secrets/<build>/` and runs it through the `~/.shell-secrets/current` link on the Node.js that ran `install`, falling back to the `node` on PATH. The command no longer changes between versions installed by the same Node.js, so Codex keeps trusting it, and the Claude Code `PreToolUse` entry sets `onFailure: "block"` so a hook that cannot start or times out blocks the call.
-- On a Node.js older than 22 the hook blocks with a message naming the Node it found, and `install` refuses, instead of running an untested check; the `Stop` hook exits 1 there, so the reply stands.
+- On a Node.js older than 22 the hook blocks with a message naming the Node it found, and `install` refuses, instead of running an untested check; the `Stop` hook exits 0 there, so the reply stands.
 
 ## [0.2.1] — 2026-10-19
 
