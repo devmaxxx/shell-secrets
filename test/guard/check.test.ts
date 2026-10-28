@@ -357,4 +357,56 @@ describe('checkToolCall', () => {
     const trailing = ['*** Begin Patch', '*** Add File: .env  ', `+${fake.github()}`, '*** End Patch'].join('\n')
     expect(ids({ kind: 'patch', patch: trailing }, exact)).toEqual([])
   })
+
+  describe('a git tag whose options a substitution prints', () => {
+    const tag = 'git -c user.name=Max -c user.email=max@example.com tag'
+
+    it('lets a guarded literal echo through, as the tag it writes', () => {
+      const command = `${tag} $( [ "$(git cat-file -t v0.1.1)" = tag ] && echo "-a -m v0.3.0" ) v0.3.0 2eafa53`
+      expect(ids({ kind: 'shell', command }, withMissing())).toEqual([])
+    })
+
+    it('reads a message file the printed options name', () => {
+      const files = { 'msg.txt': `notes ${fake.github()}` }
+      for (const command of [
+        `${tag} $( [ "$(git cat-file -t v0.1.1)" = tag ] && echo "-a -F msg.txt" ) v0.3.0`,
+        `${tag} $( [ -n x ] || echo '-F' msg.txt ) v0.3.0`,
+        `${tag} $(echo -F msg.txt) v0.3.0`,
+        `${tag} "$(echo -Fmsg.txt)" v0.3.0`,
+        `${tag} $(echo -n -F msg.txt) v0.3.0`,
+      ])
+        expect(ids({ kind: 'shell', command }, withMissing(files)), command).toEqual(['github-token'])
+    })
+
+    it('still blocks a substitution whose output it cannot see', () => {
+      for (const command of [
+        `${tag} -a -m "$( [ -f .env ] && cat .env )" v0.3.0`,
+        `${tag} $( [ -f x ] && echo "$K" ) v0.3.0`,
+        `${tag} $( [ -f x ] && printf '%s' -F msg.txt ) v0.3.0`,
+        `${tag} $( [ "$(cat .env)" ] ; cat .env ) v0.3.0`,
+      ])
+        expect([...new Set(ids({ kind: 'shell', command }, withMissing()))], command).toEqual(['unscanned-published-file'])
+    })
+  })
+
+  describe('a message file tee writes from its own heredoc', () => {
+    it('lets a literal body through, which the command already shows', () => {
+      for (const command of [
+        `tee /tmp/s/body.md <<'EOF' >/dev/null\nhi\nEOF\ngh pr edit 12 --body-file /tmp/s/body.md`,
+        `tee /tmp/s/body.md > /dev/null <<'EOF'\nhi\nEOF\ngh pr edit 12 --body-file /tmp/s/body.md`,
+        `tee -a body.md <<EOF\nplain text\nEOF\ngit commit -F body.md`,
+      ])
+        expect(ids({ kind: 'shell', command }, withMissing()), command).toEqual([])
+    })
+
+    it('blocks a token in the body, and a body the shell fills in', () => {
+      const token = `tee /tmp/s/body.md <<'EOF' >/dev/null\nsee ${fake.github()}\nEOF\ngh pr edit 12 --body-file /tmp/s/body.md`
+      expect(ids({ kind: 'shell', command: token }, withMissing())).toEqual(['github-token'])
+      const filled = `tee /tmp/s/body.md <<EOF >/dev/null\n$(cat .env)\nEOF\ngh pr edit 12 --body-file /tmp/s/body.md`
+      expect(ids({ kind: 'shell', command: filled }, withMissing())).toEqual(['unscanned-published-file'])
+      // A quote is no heredoc: the operand is a file name, and tee copies a pipe nobody can see.
+      const quoted = `tee 'a <<EOF' ./x\ngh pr edit 12 --body-file ./x`
+      expect(ids({ kind: 'shell', command: quoted }, withMissing())).toEqual(['unscanned-published-file'])
+    })
+  })
 })

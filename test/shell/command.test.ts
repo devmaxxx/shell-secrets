@@ -698,6 +698,14 @@ describe('hostile command lines, in linear time', () => {
     within(2000, sized('x="$(cat <<\'EOF\'\nsay "hi\n)"; '))
   })
 
+  it('scans long runs of echoes, behind tests or not, that it reads the command again with', () => {
+    within(1000, sized('$(echo -a) ', 'git tag ', 'v1'))
+    within(1000, sized('$( [ "$(x)" = y ] && echo -a ) ', 'git tag ', 'v1'))
+    within(1000, sized('[ "$(x)" = y ] && ', 'git tag $( ', 'echo -a ) v1'))
+    within(1000, sized('[ a ] ', 'git tag $( ', '&& echo -a ) v1'))
+    expect(scan(sized('$( [ x ] && echo -a ) ', 'git tag ', 'v1')).unresolved).toEqual([`a command with more than 16 readings of its echoes`])
+  })
+
   it('blocks a line nested so deep that reading it would outlast the hook', () => {
     // Every level repeats the text of the ones inside it.
     const deep = 'a=$( '.repeat(15_000) + ')'.repeat(15_000)

@@ -195,6 +195,10 @@ export const FILE_READER = new RegExp(`^\\s*${COMMAND_PREFIX}(?:cat|head|tail)(?
 
 export const HEREDOC_INTO_CAT = new RegExp(`^\\s*${COMMAND_PREFIX}cat(?:\\s+\\d?>>?\\s*\\S+)?\\s+<<-?[ \\t]*(?<word>${HEREDOC_WORD})`)
 
+// `tee file <<'EOF'` reads its own heredoc, not the pipe before it. Its
+// operands and redirects stand before the `<<` or after the delimiter.
+export const HEREDOC_INTO_TEE = new RegExp(`^\\s*${COMMAND_PREFIX}tee(?:\\s+[^\\s<]\\S*)*\\s+<<-?[ \\t]*(?<word>${HEREDOC_WORD})`)
+
 // A `cat` that only forwards its stdin: no file operand but `-`, no heredoc and
 // no redirect, so a script printed earlier reaches the next stage as written.
 export const CAT_PASSTHROUGH = new RegExp(`^\\s*${COMMAND_PREFIX}cat(?:\\s+-)*\\s*$`)
@@ -230,6 +234,10 @@ export const MAX_SEGMENT_TEXT = 10 * MAX_COMMAND_LENGTH
 
 // `bash -c "bash -c '…'"` is followed this many levels deep, then blocked.
 export const MAX_SCRIPT_DEPTH = 3
+
+// Each echo behind a test doubles the readings of a command, one with its text
+// and one without.
+export const MAX_SPLICED_COMMANDS = 16
 
 // A double-quoted string ends at the next `"`, so a substitution in it that
 // holds quoted words of its own is cut into as many pieces as it has quotes.
@@ -459,7 +467,22 @@ export const REMOTE_TARGET = /^[^/]*:/
 // A substitution that only repeats text the command already holds.
 export const CAT_HEREDOC = /[ \t]*cat[ \t]+<</y
 
-export const LITERAL_ECHO = /[ \t]*(?:echo|printf)(?:[ \t][^\n$`()<>|;&\\'"]*)?\)/y
+// A word of an echo whose text the command shows: plain characters and quoted
+// strings that expand nothing. A brace, a glob or `~` in it still expands
+// before echo prints it, so such a word passes here but is not spelled out.
+const PRINTED_WORD = String.raw`(?:[^\s$\u0060()<>|;&\\'"]|"[^"$\u0060\\]*"|'[^']*')+`
+
+export const LITERAL_ECHO = new RegExp(String.raw`[ \t]*(?<printer>echo|printf)(?<words>(?:[ \t]+${PRINTED_WORD})*)[ \t]*\)`, 'y')
+
+export const PRINTED_WORDS = new RegExp(PRINTED_WORD, 'g')
+
+// A test prints nothing, so a substitution such as `$( [ "$(git cat-file -t v1)" = tag ] && echo -a )`
+// prints the echo or nothing. The test may read a variable or a substitution of
+// its own: their output goes to the test, not to the substitution.
+const TESTED_EXPANSION = String.raw`\$(?:\w|\{\w+\}|\((?:[^()$\u0060'"\\]|'[^'()]*'|"[^"()$\u0060\\]*")*\))`
+const TESTED_WORD = String.raw`(?:[^\s$\u0060()<>|;&\\'"]|"(?:[^"$\u0060\\]|${TESTED_EXPANSION})*"|'[^']*'|${TESTED_EXPANSION})+`
+const TEST = String.raw`(?:\[\[(?:[ \t]+${TESTED_WORD})*?[ \t]+\]\]|\[(?:[ \t]+${TESTED_WORD})*?[ \t]+\]|test(?:[ \t]+${TESTED_WORD})*)`
+export const ECHO_GUARD = new RegExp(String.raw`[ \t]*(?:${TEST}[ \t]*(?:&&|\|\|)[ \t]*)+`, 'y')
 
 export const CLOSING_PAREN = /\s*\)/y
 
